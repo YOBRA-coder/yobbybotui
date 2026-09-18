@@ -6,7 +6,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { useWebSocket } from "./hooks/useWebSocket";
 import type { Ticker, Bot, Trade, Signal, Strategy, Page, KlineUpdate } from "./types";
 import { PAIR_DISPLAY } from "./types";
-import { marketApi, signalsApi, botsApi, tradesApi, strategiesApi } from "./api/client";
+import { marketApi, signalsApi, botsApi, tradesApi, strategiesApi, accountApi } from "./api/client";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -99,6 +99,28 @@ function MainShell() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [wsStatus, setWsStatus] = useState<"connecting" | "live" | "offline">("connecting");
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  // Binance account snapshot for the top bar (equity + live P&L). Polled
+  // rather than pushed: /account/summary hits the exchange, so it's on a
+  // slow-ish interval of its own instead of riding the 5s ticker socket.
+  // A failure here is non-fatal — the pill just shows "offline" and the
+  // rest of the app carries on.
+  const [account, setAccount] = useState<Awaited<ReturnType<typeof accountApi.summary>> | null>(null);
+  useEffect(() => {
+    if (!auth.token) { setAccount(null); return; }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await accountApi.summary(auth.token!);
+        if (!cancelled) setAccount(data);
+      } catch {
+        // Leave the previous snapshot in place rather than blanking the
+        // pill on a single transient failure.
+      }
+    };
+    load();
+    const id = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [auth.token]);
 
   const notify = useCallback((msg: string, type: "success" | "error" | "info" = "info") => {
     setNotif({ msg, type });
@@ -296,9 +318,51 @@ function MainShell() {
               <span style={{ color: statusColor, fontSize: 9, fontWeight: 700, letterSpacing: 2 }}>{wsStatus.toUpperCase()}</span>
             </div>
             <span style={{ color: "var(--text-mute)", fontSize: 10, fontFamily: "monospace" }}>{clock}</span>
+            {/* "add binance balance or p and l for binance account first in
+                top bar" — the Binance pill comes BEFORE the demo one so the
+                real-money number is what you read first, and it is styled
+                differently (gold, explicit LIVE/TEST label) so a real
+                balance can never be mistaken for the paper one. Only shown
+                once Binance is actually connected. */}
+            {account?.broker_connected && (
+              <div
+                onClick={() => navigate("settings")}
+                title={
+                  account.live_error
+                    ? `Binance unreachable: ${account.live_error}`
+                    : `Binance ${account.testnet ? "testnet" : "live"} account equity, and the P&L of live trades placed from this app`
+                }
+                style={{
+                  display: "flex", alignItems: "center", gap: 7, cursor: "pointer",
+                  background: account.live_error ? "#ff475712" : "#ffd70012",
+                  border: `1px solid ${account.live_error ? "#ff475744" : "#ffd70044"}`,
+                  borderRadius: 20, padding: "3px 10px",
+                }}>
+                <span style={{ color: account.testnet ? "#0094ff" : "#ffd700", fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>
+                  {account.testnet ? "TEST" : "LIVE"}
+                </span>
+                {account.live_error ? (
+                  <span style={{ color: "#ff4757", fontSize: 10, fontWeight: 700 }}>offline</span>
+                ) : (
+                  <>
+                    <span style={{ color: "var(--text)", fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>
+                      ${(account.live?.total_equity_usdt ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </span>
+                    {account.live_pnl && (
+                      <span style={{
+                        color: account.live_pnl.total >= 0 ? "#00d084" : "#ff4757",
+                        fontSize: 10, fontWeight: 700, fontFamily: "monospace",
+                      }}>
+                        {account.live_pnl.total >= 0 ? "+" : ""}{account.live_pnl.total.toFixed(2)}
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
             {typeof auth.user?.balance === "number" && (
-              <div style={{ display: "flex", alignItems: "center", gap: 5, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 20, padding: "3px 10px" }} title="Demo wallet balance">
-                <span style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1 }}>BAL</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 20, padding: "3px 10px" }} title="Demo (paper) wallet balance — not real money">
+                <span style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1 }}>DEMO</span>
                 <span style={{ color: "#00d084", fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>${auth.user.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
               </div>
             )}

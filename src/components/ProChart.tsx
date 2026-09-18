@@ -34,6 +34,7 @@ import {
   type IPriceLine,
   type SeriesMarker,
   type Time,
+  type Logical,
 } from "lightweight-charts";
 import type { OHLCV, Trade } from "../types";
 import { useTheme } from "../context/ThemeContext";
@@ -94,6 +95,27 @@ export interface ProChartProps {
   // near the oldest candle currently loaded, so the parent can fetch and
   // prepend older history — "increase candles I view when I move back".
   onRequestMoreHistory?: () => void;
+  // "show which bot is active in charts" — the full bot list; the component
+  // filters to the ones running on `symbol` itself and renders a strip
+  // above the chart plus per-position ownership labels below it.
+  bots?: ChartBot[];
+  onBotClick?: (botId: string) => void;
+}
+
+// Deliberately a structural subset of types/index.ts's Bot rather than an
+// import of it, so ProChart stays usable by anything that can supply these
+// few fields (viewPro, backtest previews) without dragging the whole Bot
+// shape along.
+export interface ChartBot {
+  id: string;
+  name: string;
+  pair: string;
+  strategy: string;
+  status: string;
+  mode?: string;
+  market_signal?: string | null;
+  market_confidence?: number | null;
+  timeframe?: string | null;
 }
 
 const DEFAULT_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"];
@@ -217,39 +239,260 @@ function findSupportResistance(candles: OHLCV[], lookback = 5, mergePct = 0.15, 
 // breakout candle's body is at least `impulseMult`x the average recent
 // body size, which filters routine noise out and keeps only genuinely
 // impulsive moves.
-interface OrderBlock { top: number; bottom: number; kind: "bullish" | "bearish"; time: number }
-function findOrderBlocks(candles: OHLCV[], impulseMult = 1.8, maxBlocks = 4): OrderBlock[] {
-  if (candles.length < 15) return [];
-  const bodies = candles.map(c => Math.abs(c.close - c.open));
-  const avgBody = bodies.reduce((a, b) => a + b, 0) / bodies.length || 1;
-  const blocks: OrderBlock[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const impulse = candles[i];
-    const body = Math.abs(impulse.close - impulse.open);
-    if (body < avgBody * impulseMult) continue;
-    const prev = candles[i - 1];
-    const bullishImpulse = impulse.close > impulse.open;
-    const prevIsOpposite = bullishImpulse ? prev.close < prev.open : prev.close > prev.open;
-    if (!prevIsOpposite) continue;
-    blocks.push({
-      top: Math.max(prev.open, prev.close),
-      bottom: Math.min(prev.open, prev.close),
-      kind: bullishImpulse ? "bullish" : "bearish",
-      time: Math.floor(prev.time / 1000),
-    });
-  }
-  // Most recent blocks are the ones still relevant to current price action.
-  return blocks.slice(-maxBlocks);
+interface OrderBlock {
+  top: number; bottom: number; kind: "bullish" | "bearish";
+  time: number;        // bar time (seconds) of the origin candle
+  mitigated: boolean;  // price has since traded back through the block
+  strength: number;    // impulse body / average body — how decisive the move was
 }
 
-type Indicator = "ema20" | "ema50" | "bb" | "volume" | "rsi" | "macd" | "sr" | "ob";
-type DrawingTool = "none" | "line" | "box";
-interface Drawing { id: string; tool: "line" | "box"; t1: number; p1: number; t2: number; p2: number }
+// BUG FIX (why order blocks "didn't work"):
+//  1. avgBody was averaged over EVERY loaded candle — and the chart now
+//     loads up to 800+ bars on scroll-back. One volatile stretch anywhere
+//     in that history dragged the average up so far that nothing in the
+//     recent, visible range ever cleared impulseMult x avgBody, so the
+//     detector returned an empty array and the overlay drew nothing.
+//     avgBody is now a ROLLING 20-bar average measured just before the
+//     impulse, so "decisive" means decisive relative to what the market
+//     was doing at that moment.
+//  2. It required the immediately-preceding candle to be the opposite
+//     colour. Real impulses usually start from a small 1-3 bar base, so
+//     that one-bar rule discarded most genuine blocks. Now it walks back
+//     up to 3 bars to find the origin candle.
+//  3. Blocks that price has already traded straight back through are no
+//     longer tradeable levels, but were still drawn identically to fresh
+//     ones. They're now flagged `mitigated` and rendered faded, and fresh
+//     blocks are preferred when trimming to maxBlocks.
+function findOrderBlocks(candles: OHLCV[], impulseMult = 1.5, maxBlocks = 6): OrderBlock[] {
+  if (candles.length < 25) return [];
+  const blocks: OrderBlock[] = [];
+  const lastPrice = candles[candles.length - 1].close;
+
+  for (let i = 21; i < candles.length; i++) {
+    const impulse = candles[i];
+    const body = Math.abs(impulse.close - impulse.open);
+    // Rolling baseline: the 20 bars immediately BEFORE this one.
+    const window = candles.slice(i - 20, i);
+    const avgBody = window.reduce((a, c) => a + Math.abs(c.close - c.open), 0) / window.length || 1;
+    if (body < avgBody * impulseMult) continue;
+
+    const bullishImpulse = impulse.close > impulse.open;
+    // Walk back up to 3 bars for the last opposite-coloured candle — the
+    // "base" the impulse launched from.
+    let origin: OHLCV | null = null;
+    for (let back = 1; back <= 3 && i - back >= 0; back++) {
+      const c = candles[i - back];
+      const isOpposite = bullishImpulse ? c.close < c.open : c.close > c.open;
+      if (isOpposite) { origin = c; break; }
+    }
+    if (!origin) continue;
+
+    const top = Math.max(origin.open, origin.close);
+    const bottom = Math.min(origin.open, origin.close);
+    // Mitigated = price has closed back through the far side of the block
+    // at some point after it formed.
+    let mitigated = false;
+    for (let j = i + 1; j < candles.length; j++) {
+      if (bullishImpulse ? candles[j].close < bottom : candles[j].close > top) { mitigated = true; break; }
+    }
+    blocks.push({
+      top, bottom, kind: bullishImpulse ? "bullish" : "bearish",
+      time: Math.floor(origin.time / 1000),
+      mitigated, strength: body / avgBody,
+    });
+  }
+
+  // Prefer fresh (unmitigated) blocks, then the ones nearest current price.
+  return blocks
+    .sort((a, b) => {
+      if (a.mitigated !== b.mitigated) return a.mitigated ? 1 : -1;
+      const da = Math.min(Math.abs(a.top - lastPrice), Math.abs(a.bottom - lastPrice));
+      const db = Math.min(Math.abs(b.top - lastPrice), Math.abs(b.bottom - lastPrice));
+      return da - db;
+    })
+    .slice(0, maxBlocks)
+    .sort((a, b) => a.time - b.time);
+}
+
+// ── Supply & demand zones ────────────────────────────────────────────────
+// Distinct from the S/R price lines above: S/R marks a single price, a
+// supply/demand zone marks a price RANGE (the consolidation "base" a move
+// originated from) and is what most smart-money workflows actually trade
+// off. Detection is the classic base-then-departure pattern: 1-4 small
+// -bodied candles (the base), immediately followed by a candle that leaves
+// the base decisively. Demand = departure up (zone below price acts as a
+// floor); supply = departure down.
+interface SDZone {
+  top: number; bottom: number; kind: "supply" | "demand";
+  time: number; touches: number; fresh: boolean;
+}
+function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
+  if (candles.length < 30) return [];
+  const zones: SDZone[] = [];
+
+  for (let i = 25; i < candles.length; i++) {
+    const departure = candles[i];
+    const depBody = Math.abs(departure.close - departure.open);
+    const depRange = departure.high - departure.low;
+    if (depRange <= 0) continue;
+    // A real departure candle is mostly body, not wick.
+    if (depBody / depRange < 0.6) continue;
+
+    const window = candles.slice(i - 20, i);
+    const avgRange = window.reduce((a, c) => a + (c.high - c.low), 0) / window.length || 1;
+    if (depBody < avgRange * 1.3) continue;
+
+    // Collect the base: consecutive preceding candles with small bodies.
+    const base: OHLCV[] = [];
+    for (let back = 1; back <= 4 && i - back >= 0; back++) {
+      const c = candles[i - back];
+      const r = c.high - c.low;
+      if (r <= 0) break;
+      if (Math.abs(c.close - c.open) / r > 0.5) break; // too decisive to be a base
+      base.push(c);
+    }
+    if (base.length === 0) continue;
+
+    const top = Math.max(...base.map(c => c.high));
+    const bottom = Math.min(...base.map(c => c.low));
+    const kind: "supply" | "demand" = departure.close > departure.open ? "demand" : "supply";
+
+    // How many times price has come back and touched this zone since — a
+    // zone that has already been tested several times is weaker.
+    let touches = 0;
+    let broken = false;
+    for (let j = i + 1; j < candles.length; j++) {
+      const c = candles[j];
+      if (c.low <= top && c.high >= bottom) touches++;
+      if (kind === "demand" ? c.close < bottom : c.close > top) { broken = true; break; }
+    }
+    if (broken) continue; // zone has been consumed — no longer a level
+
+    zones.push({
+      time: Math.floor(base[base.length - 1].time / 1000),
+      top, bottom, kind, touches, fresh: touches === 0,
+    });
+  }
+
+  const lastPrice = candles[candles.length - 1].close;
+  return zones
+    .sort((a, b) => {
+      if (a.fresh !== b.fresh) return a.fresh ? -1 : 1;
+      const da = Math.min(Math.abs(a.top - lastPrice), Math.abs(a.bottom - lastPrice));
+      const db = Math.min(Math.abs(b.top - lastPrice), Math.abs(b.bottom - lastPrice));
+      return da - db;
+    })
+    .slice(0, maxZones)
+    .sort((a, b) => a.time - b.time);
+}
+
+// ── Candlestick pattern recognition ──────────────────────────────────────
+// "highlight type of candle in chart" — classifies each bar so the legend
+// can name whatever the crosshair is on, and the notable reversal patterns
+// get a small label drawn above/below the bar itself.
+export interface CandleType {
+  name: string;
+  bias: "bullish" | "bearish" | "neutral";
+  notable: boolean; // worth drawing a marker on the chart for
+}
+function classifyCandle(c: OHLCV, prev?: OHLCV): CandleType {
+  const body = Math.abs(c.close - c.open);
+  const range = c.high - c.low;
+  if (range <= 0) return { name: "Flat", bias: "neutral", notable: false };
+
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  const bodyPct = body / range;
+  const bullish = c.close > c.open;
+
+  // Two-bar patterns first — they override single-bar reads.
+  if (prev) {
+    const prevBody = Math.abs(prev.close - prev.open);
+    const prevBull = prev.close > prev.open;
+    if (prevBody > 0 && body > prevBody) {
+      if (bullish && !prevBull && c.close >= prev.open && c.open <= prev.close)
+        return { name: "Bullish Engulfing", bias: "bullish", notable: true };
+      if (!bullish && prevBull && c.close <= prev.open && c.open >= prev.close)
+        return { name: "Bearish Engulfing", bias: "bearish", notable: true };
+    }
+  }
+
+  if (bodyPct < 0.08) {
+    if (lowerWick > body * 3 && upperWick < body * 1.5)
+      return { name: "Dragonfly Doji", bias: "bullish", notable: true };
+    if (upperWick > body * 3 && lowerWick < body * 1.5)
+      return { name: "Gravestone Doji", bias: "bearish", notable: true };
+    return { name: "Doji", bias: "neutral", notable: true };
+  }
+  if (bodyPct > 0.85)
+    return { name: bullish ? "Bullish Marubozu" : "Bearish Marubozu", bias: bullish ? "bullish" : "bearish", notable: true };
+  if (lowerWick > body * 2 && upperWick < body * 0.6)
+    return { name: bullish ? "Hammer" : "Hanging Man", bias: bullish ? "bullish" : "bearish", notable: true };
+  if (upperWick > body * 2 && lowerWick < body * 0.6)
+    return { name: bullish ? "Inverted Hammer" : "Shooting Star", bias: bullish ? "bullish" : "bearish", notable: true };
+  if (bodyPct < 0.3)
+    return { name: "Spinning Top", bias: "neutral", notable: false };
+  return { name: bullish ? "Bullish" : "Bearish", bias: bullish ? "bullish" : "bearish", notable: false };
+}
+
+// ── time <-> logical index ───────────────────────────────────────────────
+// THE fix for "drawings don't draw" and for order blocks/zones vanishing.
+//
+// The overlay used to position everything with timeScale().timeToCoordinate(),
+// which only resolves times that are EXACT bar times already present in the
+// series — it returns null for anything else. Two consequences:
+//   * coordinateToTime() (used to record where the mouse went) returns null
+//     the moment the pointer is anywhere right of the last candle, so any
+//     drag that ended in the empty space at the right of the chart was
+//     silently discarded and no drawing was ever created;
+//   * an order block or zone whose origin bar had scrolled out of the
+//     loaded window projected to null and the whole rectangle disappeared.
+//
+// Logical indices are continuous floats that extend past both ends of the
+// data, so logicalToCoordinate/coordinateToLogical work everywhere on the
+// canvas. Times are still what gets PERSISTED (a logical index would shift
+// every time older history is prepended); these two helpers convert.
+function timeToLogical(candles: OHLCV[], timeSec: number): number | null {
+  const n = candles.length;
+  if (n === 0) return null;
+  const first = Math.floor(candles[0].time / 1000);
+  const last = Math.floor(candles[n - 1].time / 1000);
+  const step = n > 1 ? (last - first) / (n - 1) : 60;
+  if (step <= 0) return null;
+  if (timeSec <= first) return (timeSec - first) / step;
+  if (timeSec >= last) return n - 1 + (timeSec - last) / step;
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (Math.floor(candles[mid].time / 1000) <= timeSec) lo = mid; else hi = mid;
+  }
+  const tLo = Math.floor(candles[lo].time / 1000);
+  const tHi = Math.floor(candles[hi].time / 1000);
+  return tHi === tLo ? lo : lo + (timeSec - tLo) / (tHi - tLo);
+}
+function logicalToTime(candles: OHLCV[], logical: number): number | null {
+  const n = candles.length;
+  if (n === 0) return null;
+  const first = Math.floor(candles[0].time / 1000);
+  const last = Math.floor(candles[n - 1].time / 1000);
+  const step = n > 1 ? (last - first) / (n - 1) : 60;
+  if (logical <= 0) return Math.round(first + logical * step);
+  if (logical >= n - 1) return Math.round(last + (logical - (n - 1)) * step);
+  const lo = Math.floor(logical);
+  const frac = logical - lo;
+  const tLo = Math.floor(candles[lo].time / 1000);
+  const tHi = Math.floor(candles[Math.min(lo + 1, n - 1)].time / 1000);
+  return Math.round(tLo + (tHi - tLo) * frac);
+}
+
+type Indicator = "ema20" | "ema50" | "bb" | "volume" | "rsi" | "macd" | "sr" | "ob" | "sd" | "pat";
+type DrawingTool = "none" | "hline" | "line" | "ray" | "box";
+interface Drawing { id: string; tool: "hline" | "line" | "ray" | "box"; t1: number; p1: number; t2: number; p2: number }
 
 export default function ProChart({
   candles, trades, symbol, timeframe, timeframes = DEFAULT_TIMEFRAMES,
   onTimeframeChange, onTradeClick, onUpdateTpSl, orderBook, signalOverlay, backtestOverlay, height = 520,
-  loading = false, onRequestMoreHistory,
+  loading = false, onRequestMoreHistory, bots = [], onBotClick,
 }: ProChartProps) {
   const { resolved } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -269,7 +512,7 @@ export default function ProChart({
 
   // trade_id -> { sl?: IPriceLine, tp?: IPriceLine }
   const priceLinesRef = useRef<Map<string, { sl?: IPriceLine; tp?: IPriceLine }>>(new Map());
-  const dragRef = useRef<{ tradeId: string; kind: "sl" | "tp" } | null>(null);
+  const dragRef = useRef<{ tradeId: string; kind: "sl" | "tp"; from: number | null } | null>(null);
   const signalLinesRef = useRef<IPriceLine[]>([]);
   const srLinesRef = useRef<IPriceLine[]>([]);
   const clickCandidateRef = useRef<{ x: number; y: number; time: number | null } | null>(null);
@@ -278,9 +521,14 @@ export default function ProChart({
   // I toggle, save my settings even when reload") — stored once globally
   // rather than per-symbol, since which studies someone likes to see is a
   // chart preference, not something tied to one pair.
-  const INDICATOR_STORAGE_KEY = "chart_indicators_v1";
+  // Storage key bumped to v2 — v1 payloads have no `sd`/`pat` keys, and the
+  // spread below would leave them undefined rather than falling back to the
+  // defaults, so the two new toggles would render permanently "off" with no
+  // way to tell why for anyone who had ever toggled an indicator before.
+  const INDICATOR_STORAGE_KEY = "chart_indicators_v2";
   const DEFAULT_INDICATORS: Record<Indicator, boolean> = {
-    ema20: true, ema50: true, bb: false, volume: true, rsi: false, macd: false, sr: false, ob: false,
+    ema20: true, ema50: true, bb: false, volume: true, rsi: false, macd: false,
+    sr: false, ob: false, sd: false, pat: false,
   };
   const [indicators, setIndicators] = useState<Record<Indicator, boolean>>(() => {
     try {
@@ -314,8 +562,24 @@ export default function ProChart({
   // still there when you come back to this pair.
   const [drawTool, setDrawTool] = useState<DrawingTool>("none");
   const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const [selectedDrawing, setSelectedDrawing] = useState<string | null>(null);
   const drawStartRef = useRef<{ time: number; price: number } | null>(null);
   const [, forceRedraw] = useState(0);
+
+  // "the pop up currently shows after user to confirm and approve" —
+  // dragging an SL/TP line used to fire the PATCH the instant you let go of
+  // the mouse, so the trade was already modified server-side by the time
+  // any dialog appeared. The drag now only moves the line locally and parks
+  // the result here; nothing is sent until the user approves it, and
+  // cancelling snaps the line back to where it was.
+  const [pendingTpSl, setPendingTpSl] = useState<
+    { tradeId: string; kind: "sl" | "tp"; from: number | null; to: number; side: string; entry: number } | null
+  >(null);
+
+  // The mouse handlers are attached once on mount, so they can't close over
+  // `candles` directly — they read it through this ref instead.
+  const candlesRef = useRef<OHLCV[]>(candles);
+  useEffect(() => { candlesRef.current = candles; }, [candles]);
 
   // BUG FIX: this used to key drawings by `symbol` alone, so a trendline
   // drawn on the 1h chart would also (confusingly) show up on the 1d chart
@@ -367,6 +631,13 @@ export default function ProChart({
   useEffect(() => { onTradeClickRef.current = onTradeClick; }, [onTradeClick]);
   useEffect(() => { symbolTradesRef.current = symbolTrades; }, [symbolTrades]);
 
+  const setPendingTpSlRef = useRef(setPendingTpSl);
+  useEffect(() => { setPendingTpSlRef.current = setPendingTpSl; }, []);
+  const drawingsRef = useRef<Drawing[]>(drawings);
+  useEffect(() => { drawingsRef.current = drawings; }, [drawings]);
+  const setSelectedDrawingRef = useRef(setSelectedDrawing);
+  useEffect(() => { setSelectedDrawingRef.current = setSelectedDrawing; }, []);
+
   // ── Chart + series setup (once) ────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
@@ -417,7 +688,17 @@ export default function ProChart({
 
     const priceAtY = (y: number) => candleSeries.coordinateToPrice(y);
     const yAtPrice = (p: number) => candleSeries.priceToCoordinate(p);
-    const timeAtX = (x: number) => chart.timeScale().coordinateToTime(x) as number | null;
+    // BUG FIX: was chart.timeScale().coordinateToTime(x), which returns null
+    // for any x that isn't over an existing bar — i.e. the whole empty area
+    // to the right of the newest candle, and anywhere past the data on
+    // either side. Every drag that ended there produced a null time, and the
+    // mouseup handler below simply threw the drawing away. Going through the
+    // logical index instead resolves every x on the canvas.
+    const timeAtX = (x: number): number | null => {
+      const logical = chart.timeScale().coordinateToLogical(x);
+      if (logical == null) return null;
+      return logicalToTime(candlesRef.current, logical as number);
+    };
 
     const onMouseDown = (e: MouseEvent) => {
       const rect = el.getBoundingClientRect();
@@ -427,14 +708,27 @@ export default function ProChart({
       if (drawToolRef.current !== "none") {
         const time = timeAtX(x);
         const price = priceAtY(y);
+        // BUG FIX: pan/zoom was only disabled when both time and price
+        // resolved. When they didn't (which, before the timeAtX fix above,
+        // was most of the canvas) the drag fell through to the chart's own
+        // pan handler — so the chart scrolled under the cursor and nothing
+        // was drawn. Lock the chart on any mousedown while a tool is armed.
+        chart.applyOptions({ handleScroll: false, handleScale: false });
         if (time != null && price != null) {
+          // A horizontal line needs no drag at all — one click sets the
+          // price and it spans the full width. Commit it immediately so
+          // "straight line" behaves the way it does in every other charting
+          // tool instead of requiring a meaningless sideways drag.
+          if (drawToolRef.current === "hline") {
+            addDrawingRef.current({
+              id: `d_${Date.now()}`, tool: "hline",
+              t1: time, p1: price, t2: time, p2: price,
+            });
+            chart.applyOptions({ handleScroll: true, handleScale: true });
+            forceRedrawRef.current();
+            return;
+          }
           drawStartRef.current = { time, price };
-          // BUG FIX: this never disabled chart pan/zoom while drawing, so
-          // click-dragging to draw a line/box also panned the chart at the
-          // same time — the drawing would land somewhere other than where
-          // you dragged, or seem to not draw at all. Same fix already
-          // applied to SL/TP dragging below; drawing needs it too.
-          chart.applyOptions({ handleScroll: false, handleScale: false });
         }
         return;
       }
@@ -446,7 +740,7 @@ export default function ProChart({
           if (!line) continue;
           const ly = yAtPrice(line.options().price);
           if (ly != null && Math.abs(ly - y) <= HIT_PX) {
-            dragRef.current = { tradeId, kind };
+            dragRef.current = { tradeId, kind, from: line.options().price };
             chart.applyOptions({ handleScroll: false, handleScale: false });
             return;
           }
@@ -487,14 +781,27 @@ export default function ProChart({
       const y = e.clientY - rect.top;
 
       if (drawStartRef.current) {
+        const start = drawStartRef.current;
         const time = timeAtX(x);
         const price = priceAtY(y);
-        if (time != null && price != null && drawToolRef.current !== "none") {
-          const d: Drawing = {
-            id: `d_${Date.now()}`, tool: drawToolRef.current,
-            t1: drawStartRef.current.time, p1: drawStartRef.current.price, t2: time, p2: price,
-          };
-          addDrawingRef.current(d);
+        const tool = drawToolRef.current;
+        // A near-zero drag produces a line with no length / a box with no
+        // area — invisible on screen, and previously the most common reason
+        // a user thought "drawing isn't working" after a stray click.
+        // Require a few pixels of actual movement before committing.
+        const startLogical = timeToLogical(candlesRef.current, start.time);
+        const startX = startLogical == null
+          ? null
+          : chart.timeScale().logicalToCoordinate(startLogical as Logical);
+        const startY = yAtPrice(start.price);
+        const draggedFarEnough =
+          startX == null || startY == null ? true : Math.hypot(x - startX, y - startY) > 4;
+
+        if (time != null && price != null && tool !== "none" && tool !== "hline" && draggedFarEnough) {
+          addDrawingRef.current({
+            id: `d_${Date.now()}`, tool,
+            t1: start.time, p1: start.price, t2: time, p2: price,
+          });
         }
         drawStartRef.current = null;
         previewRef.current = null;
@@ -504,23 +811,75 @@ export default function ProChart({
       }
 
       if (dragRef.current) {
-        const { tradeId, kind } = dragRef.current;
+        const { tradeId, kind, from } = dragRef.current;
         const lines = priceLinesRef.current.get(tradeId);
         const line = lines?.[kind];
         const finalPrice = line?.options().price;
         dragRef.current = null;
         chart.applyOptions({ handleScroll: true, handleScale: true });
-        if (finalPrice != null && onUpdateTplRef.current) {
-          onUpdateTplRef.current(tradeId, kind === "sl" ? { stop_loss: finalPrice } : { take_profit: finalPrice });
-        }
+        // Unchanged (or a mis-click rather than a real drag) — nothing to
+        // confirm, don't bother the user with a dialog.
+        if (finalPrice == null || (from != null && Math.abs(finalPrice - from) < 1e-9)) return;
+        const trade = symbolTradesRef.current.find(t => t.id === tradeId);
+        // Park the proposed level and let the confirmation UI decide. The
+        // PATCH is NOT sent here any more — see pendingTpSl.
+        setPendingTpSlRef.current({
+          tradeId, kind, from: from ?? null, to: finalPrice,
+          side: trade?.side ?? "BUY", entry: trade?.price ?? finalPrice,
+        });
         return;
       }
 
       const start = clickCandidateRef.current;
       clickCandidateRef.current = null;
-      if (!start || !onTradeClickRef.current) return;
+      if (!start) return;
       const movedPx = Math.hypot(x - start.x, y - start.y);
       if (movedPx > 4) return; // treat as a pan, not a click
+
+      // Click-to-select a drawing (cursor tool only) so it can be deleted
+      // individually — previously the ONLY way to remove anything was
+      // "Clear", which wiped every drawing on the chart at once.
+      const hitDrawing = (() => {
+        const pt = (t: number, p: number) => {
+          const l = timeToLogical(candlesRef.current, t);
+          if (l == null) return null;
+          const px = chart.timeScale().logicalToCoordinate(l as Logical);
+          const py = yAtPrice(p);
+          return px == null || py == null ? null : { x: px, y: py };
+        };
+        for (const d of drawingsRef.current) {
+          if (d.tool === "hline") {
+            const py = yAtPrice(d.p1);
+            if (py != null && Math.abs(py - y) <= 6) return d.id;
+            continue;
+          }
+          const a = pt(d.t1, d.p1), b = pt(d.t2, d.p2);
+          if (!a || !b) continue;
+          if (d.tool === "box") {
+            const inX = x >= Math.min(a.x, b.x) - 4 && x <= Math.max(a.x, b.x) + 4;
+            const inY = y >= Math.min(a.y, b.y) - 4 && y <= Math.max(a.y, b.y) + 4;
+            const nearEdge =
+              Math.abs(x - a.x) <= 6 || Math.abs(x - b.x) <= 6 ||
+              Math.abs(y - a.y) <= 6 || Math.abs(y - b.y) <= 6;
+            if (inX && inY && nearEdge) return d.id;
+            continue;
+          }
+          // line / ray: perpendicular distance to the segment
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const len2 = dx * dx + dy * dy;
+          if (len2 === 0) continue;
+          let t = ((x - a.x) * dx + (y - a.y) * dy) / len2;
+          if (d.tool === "line") t = Math.max(0, Math.min(1, t));
+          else t = Math.max(0, t); // a ray extends forward without limit
+          const dist = Math.hypot(x - (a.x + t * dx), y - (a.y + t * dy));
+          if (dist <= 6) return d.id;
+        }
+        return null;
+      })();
+      if (hitDrawing) { setSelectedDrawingRef.current(hitDrawing); return; }
+      setSelectedDrawingRef.current(null);
+
+      if (!onTradeClickRef.current) return;
       if (start.time == null) return;
 
       // Find the closest trade marker within a small time+price window.
@@ -545,6 +904,13 @@ export default function ProChart({
     // range changes (pan/zoom) — drawings are stored as time/price, not
     // pixels, so they need re-projecting whenever the view moves.
     chart.timeScale().subscribeVisibleTimeRangeChange(() => forceRedrawRef.current());
+    // BUG FIX: only the TIME range was subscribed. Zooming with the scroll
+    // wheel or pinching changes the LOGICAL range (bar spacing) without
+    // necessarily changing the visible time range's endpoints, so drawings
+    // and order-block rectangles stayed frozen at their old pixel positions
+    // while the candles underneath them moved — they looked misplaced until
+    // you panned. Also fires on price-scale changes.
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => forceRedrawRef.current());
     const onWindowResize = () => forceRedrawRef.current();
     window.addEventListener("resize", onWindowResize);
 
@@ -836,6 +1202,37 @@ export default function ProChart({
     [candles, indicators.ob]
   );
 
+  const sdZones = useMemo(
+    () => (indicators.sd ? findSupplyDemandZones(candles) : []),
+    [candles, indicators.sd]
+  );
+
+  // Pattern labels are only drawn for the most recent stretch of bars —
+  // labelling 800 candles would bury the chart under text and cost a
+  // pointless amount of layout work every redraw.
+  const candlePatterns = useMemo(() => {
+    if (!indicators.pat || candles.length < 2) return [];
+    const from = Math.max(1, candles.length - 60);
+    const out: { time: number; type: CandleType; high: number; low: number }[] = [];
+    for (let i = from; i < candles.length; i++) {
+      const type = classifyCandle(candles[i], candles[i - 1]);
+      if (!type.notable) continue;
+      out.push({ time: Math.floor(candles[i].time / 1000), type, high: candles[i].high, low: candles[i].low });
+    }
+    return out;
+  }, [candles, indicators.pat]);
+
+  // "show which bot is active in charts" — the bots trading THIS pair.
+  const pairBots = useMemo(
+    () => bots.filter(b => b.pair === symbol),
+    [bots, symbol]
+  );
+  const botById = useMemo(() => {
+    const m = new Map<string, ChartBot>();
+    for (const b of bots) m.set(b.id, b);
+    return m;
+  }, [bots]);
+
   // ── Crosshair OHLC readout ───────────────────────────────────────────────
   // "make my chart premium" + "h,l in candles" — a live legend that tracks
   // the crosshair (or the latest bar, at rest) showing O/H/L/C the way a
@@ -855,6 +1252,33 @@ export default function ProChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles]);
   const legendBar = hoverBar ?? candles[candles.length - 1] ?? null;
+  // "highlight type of candle in chart" — whatever bar the crosshair is on
+  // (or the newest bar at rest) gets named in the legend, always, whether
+  // or not the PAT overlay is toggled on.
+  const legendCandleType = useMemo(() => {
+    if (!legendBar) return null;
+    const idx = candles.findIndex(c => c.time === legendBar.time);
+    return classifyCandle(legendBar, idx > 0 ? candles[idx - 1] : undefined);
+  }, [legendBar, candles]);
+
+  // Delete / Backspace removes the selected drawing. Escape deselects, and
+  // also disarms the drawing tool — previously the only way back to the
+  // cursor was clicking the ↖ button.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (e.key === "Escape") { setSelectedDrawing(null); setDrawTool("none"); return; }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedDrawing) {
+        e.preventDefault();
+        saveDrawings(drawings.filter(d => d.id !== selectedDrawing));
+        setSelectedDrawing(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDrawing, drawings]);
 
   // ── Load older history on scroll-back ───────────────────────────────────
   // Fires onRequestMoreHistory (debounced) once the visible range's left
@@ -885,10 +1309,30 @@ export default function ProChart({
   const projectPoint = (time: number, price: number): { x: number; y: number } | null => {
     const chart = chartRef.current, series = candleSeriesRef.current;
     if (!chart || !series) return null;
-    const x = chart.timeScale().timeToCoordinate(time as Time);
+    // BUG FIX: was timeToCoordinate(time), which only resolves exact bar
+    // times that are currently in the series — so anything anchored to a
+    // bar that had scrolled out of the loaded window, or to a point in the
+    // empty space right of the newest candle, returned null and the whole
+    // shape silently disappeared. This is why order blocks would show once
+    // and then vanish, and why boxes drawn near the right edge never
+    // appeared at all.
+    const logical = timeToLogical(candles, time);
+    if (logical == null) return null;
+    const x = chart.timeScale().logicalToCoordinate(logical as Logical);
     const y = series.priceToCoordinate(price);
     if (x == null || y == null) return null;
     return { x, y };
+  };
+
+  // Projects an x for a point N bars past the newest candle — used to give
+  // order blocks and supply/demand zones a right edge that extends into the
+  // empty space ahead of price, the way they're drawn in every charting
+  // tool, instead of stopping dead on the last bar.
+  const projectFutureX = (barsAhead: number): number | null => {
+    const chart = chartRef.current;
+    if (!chart || candles.length === 0) return null;
+    const x = chart.timeScale().logicalToCoordinate((candles.length - 1 + barsAhead) as Logical);
+    return x ?? null;
   };
 
   // Open positions for this pair — a clearer, more prominent list than the
@@ -941,6 +1385,46 @@ export default function ProChart({
           <span style={{ color: "var(--text-dim)" }}>PnL <b style={{ color: backtestOverlay.pnlPct >= 0 ? "#00d084" : "#ff4757" }}>{backtestOverlay.pnlPct.toFixed(2)}%</b></span>
         </div>
       )}
+      {/* "show which bot is active in charts" — every bot configured on this
+          pair, with its live status and what it's currently reading, so you
+          can see at a glance who's trading the chart you're looking at. */}
+      {pairBots.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", padding: "4px 4px 0" }}>
+          <span style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1 }}>BOTS ON {symbol}</span>
+          {pairBots.map(b => {
+            const running = b.status === "RUNNING";
+            const dot = running ? "#00d084" : b.status === "PAUSED" ? "#ffd700" : "var(--text-mute)";
+            const sig = b.market_signal;
+            const sigColor = sig === "BUY" ? "#00d084" : sig === "SELL" ? "#ff4757" : "var(--text-dim)";
+            return (
+              <button key={b.id} onClick={() => onBotClick?.(b.id)}
+                title={`${b.name} — ${b.strategy} • ${b.status}${b.timeframe ? ` • ${b.timeframe}` : ""}`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "3px 9px", borderRadius: 20,
+                  fontSize: 10, cursor: onBotClick ? "pointer" : "default", fontFamily: "inherit",
+                  background: running ? "#00d0840f" : "var(--surface)",
+                  border: `1px solid ${running ? "#00d08444" : "var(--border2)"}`,
+                  color: "var(--text-dim)",
+                }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: "50%", background: dot, flexShrink: 0,
+                  animation: running ? "pcPulse 1.6s ease-in-out infinite" : undefined,
+                }} />
+                <span style={{ color: "var(--text)", fontWeight: 700 }}>{b.name}</span>
+                {b.mode === "LIVE" && (
+                  <span style={{ color: "#ffd700", fontWeight: 800, fontSize: 8, letterSpacing: 0.5 }}>LIVE</span>
+                )}
+                {sig && (
+                  <span style={{ color: sigColor, fontWeight: 700 }}>
+                    {sig}{b.market_confidence != null ? ` ${b.market_confidence.toFixed(0)}%` : ""}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Toolbar: timeframes + indicator toggles */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 4px", alignItems: "center" }}>
         {timeframes.map(tf => (
@@ -953,18 +1437,35 @@ export default function ProChart({
             }}>{tf}</button>
         ))}
         <div style={{ width: 1, height: 18, background: "var(--border2)", margin: "0 4px" }} />
-        {(["ema20", "ema50", "bb", "volume", "rsi", "macd", "sr", "ob"] as Indicator[]).map(k => (
-          <button key={k} onClick={() => toggle(k)}
+        {([
+          ["ema20", "EMA20", "20-period EMA"],
+          ["ema50", "EMA50", "50-period EMA"],
+          ["bb", "BB", "Bollinger Bands"],
+          ["volume", "VOL", "Volume"],
+          ["rsi", "RSI", "RSI pane"],
+          ["macd", "MACD", "MACD pane"],
+          ["sr", "S/R", "Support & resistance levels"],
+          ["ob", "OB", "Order blocks"],
+          ["sd", "S/D", "Supply & demand zones"],
+          ["pat", "PAT", "Candlestick pattern labels"],
+        ] as [Indicator, string, string][]).map(([k, label, title]) => (
+          <button key={k} onClick={() => toggle(k)} title={title}
             style={{
               padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
               background: indicators[k] ? "#0094ff22" : "var(--surface)",
               color: indicators[k] ? "#0094ff" : "var(--text-dim)",
               border: `1px solid ${indicators[k] ? "#0094ff" : "var(--border2)"}`,
-            }}>{k.toUpperCase()}</button>
+            }}>{label}</button>
         ))}
         <div style={{ width: 1, height: 18, background: "var(--border2)", margin: "0 4px" }} />
-        {([["none", "↖"], ["line", "╱ Line"], ["box", "▭ Box"]] as [DrawingTool, string][]).map(([tool, label]) => (
-          <button key={tool} onClick={() => setDrawTool(tool)} title={tool === "none" ? "Cursor (pan/zoom)" : `Draw ${tool}`}
+        {([
+          ["none", "↖", "Cursor — pan/zoom, click a drawing to select it"],
+          ["hline", "─ Horizontal", "Horizontal line — single click, no drag needed"],
+          ["line", "╱ Trend", "Trend line — drag from start to end"],
+          ["ray", "➚ Ray", "Ray — drag to set the angle; extends forward forever"],
+          ["box", "▭ Box", "Rectangle / zone — drag a corner to the opposite corner"],
+        ] as [DrawingTool, string, string][]).map(([tool, label, title]) => (
+          <button key={tool} onClick={() => { setDrawTool(tool); setSelectedDrawing(null); }} title={title}
             style={{
               padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer",
               background: drawTool === tool ? "#ffd70022" : "var(--surface)",
@@ -972,8 +1473,16 @@ export default function ProChart({
               border: `1px solid ${drawTool === tool ? "#ffd700" : "var(--border2)"}`,
             }}>{label}</button>
         ))}
+        {selectedDrawing && (
+          <button
+            onClick={() => { saveDrawings(drawings.filter(d => d.id !== selectedDrawing)); setSelectedDrawing(null); }}
+            title="Delete the selected drawing (or press Delete)"
+            style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: "#ff475718", color: "#ff4757", border: "1px solid #ff475744" }}>
+            ✕ Delete
+          </button>
+        )}
         {drawings.length > 0 && (
-          <button onClick={() => saveDrawings([])} title="Clear all drawings"
+          <button onClick={() => { saveDrawings([]); setSelectedDrawing(null); }} title="Clear all drawings on this pair/timeframe"
             style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: "transparent", color: "#ff4757", border: "1px solid #ff475744" }}>
             Clear
           </button>
@@ -1005,6 +1514,12 @@ export default function ProChart({
               <span style={{ color: "var(--text-dim)" }}>H <b style={{ color: "#00d084" }}>{legendBar.high.toFixed(4)}</b></span>
               <span style={{ color: "var(--text-dim)" }}>L <b style={{ color: "#ff4757" }}>{legendBar.low.toFixed(4)}</b></span>
               <span style={{ color: "var(--text-dim)" }}>C <b style={{ color: legendBar.close >= legendBar.open ? "#00d084" : "#ff4757" }}>{legendBar.close.toFixed(4)}</b></span>
+              {legendCandleType && (
+                <span style={{
+                  color: legendCandleType.bias === "bullish" ? "#00d084" : legendCandleType.bias === "bearish" ? "#ff4757" : "#ffd700",
+                  fontWeight: 700, borderLeft: "1px solid var(--border2)", paddingLeft: 10,
+                }}>{legendCandleType.name}</span>
+              )}
             </div>
           )}
 
@@ -1027,35 +1542,200 @@ export default function ProChart({
           )}
           <style>{"@keyframes pcPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }"}</style>
 
+          {/* Confirm/approve a dragged SL or TP BEFORE it is sent. Dragging
+              only moves the line locally now; this is what actually commits
+              it. Cancel snaps the line back to where it was. */}
+          {pendingTpSl && (() => {
+            const isBuy = pendingTpSl.side === "BUY";
+            const { kind, to, entry } = pendingTpSl;
+            // Mirrors the server-side direction rules in routers/trades.py
+            // so an impossible level is caught here, with an explanation,
+            // instead of coming back as a bare 400 after the fact.
+            const invalid =
+              kind === "sl"
+                ? (isBuy ? to >= entry : to <= entry)
+                : (isBuy ? to <= entry : to >= entry);
+            const label = kind === "sl" ? "Stop loss" : "Take profit";
+            const color = kind === "sl" ? "#ff4757" : "#00d084";
+            const revert = () => {
+              const lines = priceLinesRef.current.get(pendingTpSl.tradeId);
+              const line = lines?.[kind];
+              if (line && pendingTpSl.from != null) line.applyOptions({ price: pendingTpSl.from });
+              setPendingTpSl(null);
+            };
+            return (
+              <div style={{
+                position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)",
+                zIndex: 10, background: "var(--surface)", border: `1px solid ${color}55`,
+                borderRadius: 10, padding: 14, minWidth: 260,
+                boxShadow: "0 8px 30px rgba(0,0,0,0.55)", fontSize: 12,
+              }}>
+                <div style={{ fontWeight: 800, marginBottom: 8, color }}>Confirm {label}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)", marginBottom: 4 }}>
+                  <span>Entry</span><b style={{ color: "var(--text)" }}>{entry.toFixed(4)}</b>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)", marginBottom: 4 }}>
+                  <span>Current {label.toLowerCase()}</span>
+                  <b style={{ color: "var(--text)" }}>{pendingTpSl.from != null ? pendingTpSl.from.toFixed(4) : "—"}</b>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)", marginBottom: 10 }}>
+                  <span>New {label.toLowerCase()}</span><b style={{ color }}>{to.toFixed(4)}</b>
+                </div>
+                {invalid && (
+                  <div style={{ color: "#ff4757", fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>
+                    {kind === "sl"
+                      ? `A ${pendingTpSl.side} stop loss must sit ${isBuy ? "below" : "above"} the entry price — this one would trigger immediately.`
+                      : `A ${pendingTpSl.side} take profit must sit ${isBuy ? "above" : "below"} the entry price.`}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={revert} style={{
+                    flex: 1, padding: "7px 0", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+                    background: "transparent", color: "var(--text-dim)", border: "1px solid var(--border2)", fontSize: 11,
+                  }}>Cancel</button>
+                  <button disabled={invalid}
+                    onClick={() => {
+                      onUpdateTpSl?.(pendingTpSl.tradeId, kind === "sl" ? { stop_loss: to } : { take_profit: to });
+                      setPendingTpSl(null);
+                    }}
+                    style={{
+                      flex: 1, padding: "7px 0", borderRadius: 6, cursor: invalid ? "not-allowed" : "pointer",
+                      fontFamily: "inherit", background: color, color: "#000", border: "none",
+                      fontWeight: 800, fontSize: 11, opacity: invalid ? 0.45 : 1,
+                    }}>Approve</button>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Drawing overlay — pure visual, pointer-events disabled so all
               mouse interaction still goes through the chart container's
               own handlers (which do the actual time/price math). */}
           <svg style={{ position: "absolute", inset: 0, pointerEvents: "none", width: "100%", height: "100%" }}>
-            {indicators.ob && orderBlocks.map((b, i) => {
-              const lastTime = Math.floor((candles[candles.length - 1]?.time ?? 0) / 1000);
-              const a = projectPoint(b.time, b.top);
-              const c = projectPoint(lastTime, b.bottom);
-              if (!a || !c) return null;
-              const color = b.kind === "bullish" ? "#00d084" : "#ff4757";
+            {/* Supply & demand zones — drawn first so order blocks and
+                hand-drawn shapes sit on top of them. */}
+            {indicators.sd && sdZones.map((z, i) => {
+              const a = projectPoint(z.time, z.top);
+              const yBottom = candleSeriesRef.current?.priceToCoordinate(z.bottom);
+              const rightX = projectFutureX(6);
+              if (!a || yBottom == null || rightX == null) return null;
+              const color = z.kind === "demand" ? "#00d084" : "#ff4757";
+              const h = Math.max(2, yBottom - a.y);
               return (
-                <rect key={`ob_${i}`} x={a.x} y={a.y} width={Math.max(0, c.x - a.x)} height={Math.max(0, c.y - a.y)}
-                  fill={`${color}14`} stroke={color} strokeWidth={1} strokeDasharray="3 3" />
+                <g key={`sd_${i}`}>
+                  <rect x={a.x} y={a.y} width={Math.max(0, rightX - a.x)} height={h}
+                    fill={`${color}${z.fresh ? "22" : "10"}`} stroke={color}
+                    strokeWidth={z.fresh ? 1.4 : 1} strokeDasharray={z.fresh ? undefined : "4 3"} />
+                  <text x={rightX - 4} y={a.y + h / 2 + 3} textAnchor="end"
+                    fill={color} fontSize={9} fontFamily="monospace" opacity={0.9}>
+                    {z.kind === "demand" ? "DEMAND" : "SUPPLY"}{z.fresh ? " • fresh" : ` • ${z.touches}x`}
+                  </text>
+                </g>
               );
             })}
+
+            {/* Order blocks */}
+            {indicators.ob && orderBlocks.map((b, i) => {
+              const a = projectPoint(b.time, b.top);
+              const yBottom = candleSeriesRef.current?.priceToCoordinate(b.bottom);
+              const rightX = projectFutureX(4);
+              if (!a || yBottom == null || rightX == null) return null;
+              const color = b.kind === "bullish" ? "#00d084" : "#ff4757";
+              const h = Math.max(2, yBottom - a.y);
+              return (
+                <g key={`ob_${i}`} opacity={b.mitigated ? 0.4 : 1}>
+                  <rect x={a.x} y={a.y} width={Math.max(0, rightX - a.x)} height={h}
+                    fill={`${color}16`} stroke={color} strokeWidth={1} strokeDasharray="3 3" />
+                  <text x={a.x + 4} y={a.y - 3} fill={color} fontSize={9} fontFamily="monospace" opacity={0.9}>
+                    {b.kind === "bullish" ? "OB+" : "OB−"} {b.strength.toFixed(1)}x{b.mitigated ? " (mitigated)" : ""}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Candlestick pattern labels */}
+            {indicators.pat && candlePatterns.map((p, i) => {
+              const above = p.type.bias === "bearish";
+              const anchor = projectPoint(p.time, above ? p.high : p.low);
+              if (!anchor) return null;
+              const color = p.type.bias === "bullish" ? "#00d084" : p.type.bias === "bearish" ? "#ff4757" : "#ffd700";
+              return (
+                <text key={`pat_${i}`} x={anchor.x} y={anchor.y + (above ? -8 : 14)}
+                  textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" opacity={0.85}>
+                  {p.type.name}
+                </text>
+              );
+            })}
+
+            {/* Hand-drawn shapes */}
             {drawings.map(d => {
+              const selected = d.id === selectedDrawing;
+              const stroke = selected ? "#ffffff" : "#ffd700";
+              const width = selected ? 2.5 : 2;
+
+              // A horizontal line has no meaningful second point — it spans
+              // the full chart at one price, so it only needs a y.
+              if (d.tool === "hline") {
+                const y = candleSeriesRef.current?.priceToCoordinate(d.p1);
+                if (y == null) return null;
+                return (
+                  <g key={d.id}>
+                    <line x1={0} y1={y} x2="100%" y2={y} stroke={stroke} strokeWidth={width} />
+                    <text x={6} y={y - 4} fill={stroke} fontSize={9} fontFamily="monospace">{d.p1.toFixed(4)}</text>
+                  </g>
+                );
+              }
+
               const a = projectPoint(d.t1, d.p1), b = projectPoint(d.t2, d.p2);
               if (!a || !b) return null;
+
               if (d.tool === "line") {
-                return <line key={d.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ffd700" strokeWidth={2} />;
+                return (
+                  <g key={d.id}>
+                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={stroke} strokeWidth={width} />
+                    {selected && <>
+                      <circle cx={a.x} cy={a.y} r={3.5} fill={stroke} />
+                      <circle cx={b.x} cy={b.y} r={3.5} fill={stroke} />
+                    </>}
+                  </g>
+                );
               }
+
+              if (d.tool === "ray") {
+                // Extend far past the right edge; the SVG clips it for us.
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const len = Math.hypot(dx, dy) || 1;
+                const scale = 10000 / len;
+                return (
+                  <g key={d.id}>
+                    <line x1={a.x} y1={a.y} x2={a.x + dx * scale} y2={a.y + dy * scale}
+                      stroke={stroke} strokeWidth={width} />
+                    {selected && <circle cx={a.x} cy={a.y} r={3.5} fill={stroke} />}
+                  </g>
+                );
+              }
+
               const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-              return <rect key={d.id} x={x} y={y} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#ffd70014" stroke="#ffd700" strokeWidth={1.5} />;
+              return (
+                <rect key={d.id} x={x} y={y} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)}
+                  fill="#ffd70014" stroke={stroke} strokeWidth={selected ? 2.5 : 1.5} />
+              );
             })}
+
+            {/* Live preview while dragging a new shape out */}
             {drawStartRef.current && previewRef.current && (() => {
               const a = projectPoint(drawStartRef.current.time, drawStartRef.current.price);
               const b = projectPoint(previewRef.current.time, previewRef.current.price);
               if (!a || !b) return null;
-              if (drawTool === "line") return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ffd700" strokeWidth={2} strokeDasharray="4 3" />;
+              if (drawTool === "line") {
+                return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ffd700" strokeWidth={2} strokeDasharray="4 3" />;
+              }
+              if (drawTool === "ray") {
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const len = Math.hypot(dx, dy) || 1;
+                const scale = 10000 / len;
+                return <line x1={a.x} y1={a.y} x2={a.x + dx * scale} y2={a.y + dy * scale} stroke="#ffd700" strokeWidth={2} strokeDasharray="4 3" />;
+              }
               const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
               return <rect x={x} y={y} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#ffd70014" stroke="#ffd700" strokeWidth={1.5} strokeDasharray="4 3" />;
             })()}
@@ -1092,6 +1772,15 @@ export default function ProChart({
                 background: "var(--surface)", border: "1px solid var(--border2)", fontSize: 11,
               }}>
               <span style={{ color: t.side === "BUY" ? "#00d084" : "#ff4757", fontWeight: 700 }}>{t.side}</span>
+              {/* Which bot (if any) owns this position — a manual order and a
+                  bot's order looked identical here before. */}
+              <span style={{
+                color: t.bot_id ? "#0094ff" : "var(--text-mute)", fontSize: 9,
+                border: `1px solid ${t.bot_id ? "#0094ff44" : "var(--border2)"}`,
+                borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap",
+              }}>
+                {t.bot_id ? (botById.get(t.bot_id)?.name ?? "Bot") : "Manual"}
+              </span>
               <span style={{ color: "var(--text-dim)" }}>Entry {t.price.toFixed(4)}</span>
               <span style={{ color: "var(--text-dim)" }}>Now {currentPrice.toFixed(4)}</span>
               <span style={{ color: pnl >= 0 ? "#00d084" : "#ff4757", fontWeight: 700, marginLeft: "auto" }}>

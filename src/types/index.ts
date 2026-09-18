@@ -72,7 +72,9 @@ export interface Bot {
   losses?: number;
   win_rate: number;
   capital: number;
-  current_position?: "LONG" | "SHORT" | null;
+  // MIXED = simultaneously holding a long and a short (possible once a bot
+  // may hold more than one position — see max_open_positions).
+  current_position?: "LONG" | "SHORT" | "MIXED" | null;
   started_at: number;
   max_hold_minutes?: number | null;
   // Live per-bot market read, refreshed each simulation cycle regardless
@@ -84,7 +86,11 @@ export interface Bot {
   market_updated_at?: number | null;
   // Per-bot tuning — previously one hardcoded global shared by every bot.
   confidence_threshold?: number | null;
-  timeframe?: "1m" | "5m" | "15m" | "1h" | null;
+  // BUG FIX: 4h and 1d are accepted by the backend (config.TIMEFRAMES and
+  // the bot loop's TIMEFRAME_CANDLES both list them) but were missing from
+  // this union, so a bot legitimately set to 4h/1d was a type error on the
+  // client.
+  timeframe?: "1m" | "5m" | "15m" | "1h" | "4h" | "1d" | null;
   cooldown_minutes?: number | null;
   // Last reason text this bot's evaluation produced, even when it didn't
   // trade — answers "why hasn't this bot traded yet".
@@ -94,6 +100,8 @@ export interface Bot {
   auto_pause_after_losses?: number | null;
   // "stop after how many trades" — lifetime trade-count cap.
   max_trades?: number | null;
+  // How many positions this bot may hold at once (default 1).
+  max_open_positions?: number | null;
   // Confluence mode — strategy is the literal "CONFLUENCE" marker when set.
   confluence_strategies?: string[] | null;
   confluence_min_agree?: number | null;
@@ -114,6 +122,13 @@ export interface Trade {
   stop_loss?: number | null;
   take_profit?: number | null;
   live?: boolean | number;
+  // Where this trade's stop-loss / take-profit are actually enforced:
+  // "EXCHANGE" = a resting OCO on Binance, honoured even if this app is
+  // offline. "APP" = only position_monitor_loop is watching, so the levels
+  // stop working the moment the backend does.
+  sl_tp_venue?: "EXCHANGE" | "APP";
+  exchange_order_list_id?: string | null;
+  exchange_exit_error?: string | null;
   status: "FILLED" | "PENDING" | "CANCELLED" | "CLOSED";
   created_at?: number;
   closed_at?: number | null;

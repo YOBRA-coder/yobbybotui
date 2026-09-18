@@ -175,7 +175,12 @@ export default function BotDetails({
                 <span style={{ background: "#ff475718", border: "1px solid #ff4757", color: "#ff4757", fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700 }}>LIVE</span>
               )}
               {bot.current_position && (
-                <span style={{ background: bot.current_position === "LONG" ? "#00d08418" : "#ff475718", border: `1px solid ${bot.current_position === "LONG" ? "#00d084" : "#ff4757"}`, color: bot.current_position === "LONG" ? "#00d084" : "#ff4757", fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700 }}>{bot.current_position}</span>
+                <span style={{
+                  background: bot.current_position === "LONG" ? "#00d08418" : bot.current_position === "SHORT" ? "#ff475718" : "#ffd70018",
+                  border: `1px solid ${bot.current_position === "LONG" ? "#00d084" : bot.current_position === "SHORT" ? "#ff4757" : "#ffd700"}`,
+                  color: bot.current_position === "LONG" ? "#00d084" : bot.current_position === "SHORT" ? "#ff4757" : "#ffd700",
+                  fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700,
+                }}>{bot.current_position}</span>
               )}
               <div style={{ display: "flex", alignItems: "center", gap: 3, background: bot.status === "RUNNING" ? "#00d08418" : bot.status === "PAUSED" ? "#ffd70018" : "#2e406018", border: `1px solid ${bot.status === "RUNNING" ? "#00d08444" : bot.status === "PAUSED" ? "#ffd70044" : "#2e406044"}`, borderRadius: 20, padding: "2px 7px" }}>
                 <div style={{ width: 5, height: 5, borderRadius: "50%", background: bot.status === "RUNNING" ? "#00d084" : bot.status === "PAUSED" ? "#ffd700" : "var(--text-mute)" }} />

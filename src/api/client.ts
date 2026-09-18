@@ -81,9 +81,9 @@ export const botsApi = {
   list: (token: string) => req<Bot[]>("/bots", {}, token),
   get: (token: string, id: string) =>
     req<Bot & { recent_trades: Trade[] }>(`/bots/${id}`, {}, token),
-  create: (token: string, data: { name: string; pair: string; strategy: string; capital: number; mode?: "DEMO" | "LIVE"; max_hold_minutes?: number; timeframe?: string; confidence_threshold?: number; cooldown_minutes?: number; auto_pause_after_losses?: number; max_trades?: number; confluence_strategies?: string[]; confluence_min_agree?: number }) =>
+  create: (token: string, data: { name: string; pair: string; strategy: string; capital: number; mode?: "DEMO" | "LIVE"; max_hold_minutes?: number; timeframe?: string; confidence_threshold?: number; cooldown_minutes?: number; auto_pause_after_losses?: number; max_trades?: number; max_open_positions?: number; confluence_strategies?: string[]; confluence_min_agree?: number }) =>
     req<Bot>("/bots", { method: "POST", body: JSON.stringify(data) }, token),
-  update: (token: string, id: string, data: { status?: string; capital?: number; name?: string; strategy?: string; pair?: string; mode?: "DEMO" | "LIVE"; max_hold_minutes?: number; timeframe?: string; confidence_threshold?: number; cooldown_minutes?: number; auto_pause_after_losses?: number; max_trades?: number; confluence_strategies?: string[]; confluence_min_agree?: number }) =>
+  update: (token: string, id: string, data: { status?: string; capital?: number; name?: string; strategy?: string; pair?: string; mode?: "DEMO" | "LIVE"; max_hold_minutes?: number; timeframe?: string; confidence_threshold?: number; cooldown_minutes?: number; auto_pause_after_losses?: number; max_trades?: number; max_open_positions?: number; confluence_strategies?: string[]; confluence_min_agree?: number }) =>
     req<Bot>(`/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) }, token),
   delete: (token: string, id: string) =>
     req<{ ok: boolean }>(`/bots/${id}`, { method: "DELETE" }, token),
@@ -99,7 +99,9 @@ export const botsApi = {
 // ── Trades ─────────────────────────────────────────────────────────────────────
 export const tradesApi = {
   list: (token: string) => req<Trade[]>("/trades", {}, token),
-  place: (token: string, data: { pair: string; side: string; amount: number; order_type: string; limit_price?: number; stop_loss?: number; take_profit?: number }) =>
+  // `venue` defaults to DEMO server-side — BINANCE sends a real signed
+  // market order to the connected exchange account.
+  place: (token: string, data: { pair: string; side: string; amount: number; order_type: string; limit_price?: number; stop_loss?: number; take_profit?: number; venue?: "DEMO" | "BINANCE" }) =>
     req<Trade>("/trades", { method: "POST", body: JSON.stringify(data) }, token),
   updateTpSl: (token: string, tradeId: string, data: { stop_loss?: number; take_profit?: number }) =>
     req<Trade>(`/trades/${tradeId}`, { method: "PATCH", body: JSON.stringify(data) }, token),
@@ -142,6 +144,14 @@ export const accountApi = {
       demo_balance: number; broker_connected: boolean; testnet: boolean;
       live: { balances: { asset: string; free: number; locked: number; usdt_value: number }[]; total_equity_usdt: number; can_trade: boolean } | null;
       live_error: string | null;
+      // P&L of the LIVE trades this app placed — realized from closed
+      // positions plus mark-to-market on open ones. Distinct from `live`
+      // above, which is raw exchange equity (and also counts anything you
+      // opened directly in the Binance app).
+      live_pnl: {
+        realized: number; unrealized: number; total: number;
+        open_positions: number; closed_trades: number;
+      };
       deposit_available: boolean; deposit_available_at: number; deposit_amount: number;
     }>("/account/summary", {}, token),
   deposit: (token: string) =>

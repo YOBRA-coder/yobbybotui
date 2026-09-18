@@ -30,6 +30,7 @@ export default function BotsPage({ bots, setBots, tickers, trades, notify }: Pag
     // "stop after how many trades" — lifetime trade-count cap, separate
     // from the loss-streak circuit breaker above.
     maxTrades: "",
+    maxOpenPositions: "1",
   });
   // "can i create a bot that confirms from all or selected strategies" —
   // Confluence mode: bot evaluates every checked strategy each cycle and
@@ -128,12 +129,13 @@ export default function BotsPage({ bots, setBots, tickers, trades, notify }: Pag
         cooldown_minutes: parseInt(form.cooldownMinutes, 10) || 0,
         auto_pause_after_losses: form.autoPauseAfterLosses !== "" ? parseInt(form.autoPauseAfterLosses, 10) : 4,
         max_trades: form.maxTrades ? parseInt(form.maxTrades, 10) : undefined,
+        max_open_positions: parseInt(form.maxOpenPositions, 10) || 1,
         confluence_strategies: confluenceMode ? confluenceSelected : undefined,
         confluence_min_agree: confluenceMode && confluenceMinAgree ? parseInt(confluenceMinAgree, 10) : undefined,
       });
       setBots(prev => [...prev, bot]);
       setShowNew(false);
-      setForm({ name: "", pair: "BTCUSDT", strategy: "RSI Scalper", capital: "1000", mode: "DEMO", maxHoldMinutes: "", timeframe: "15m", confidenceThreshold: "65", cooldownMinutes: "0", autoPauseAfterLosses: "4", maxTrades: "" });
+      setForm({ name: "", pair: "BTCUSDT", strategy: "RSI Scalper", capital: "1000", mode: "DEMO", maxHoldMinutes: "", timeframe: "15m", confidenceThreshold: "65", cooldownMinutes: "0", autoPauseAfterLosses: "4", maxTrades: "", maxOpenPositions: "1" });
       setConfluenceMode(false); setConfluenceSelected([]); setConfluenceMinAgree(""); setConfluenceBacktestResult(null);
       notify(`Bot "${bot.name}" launched${form.mode === "LIVE" ? " — LIVE trading" : ""}!`, "success");
     } catch (e: any) { notify(e.message, "error"); }
@@ -279,6 +281,10 @@ export default function BotsPage({ bots, setBots, tickers, trades, notify }: Pag
               <input style={S.inp} type="number" min={0} value={form.maxTrades} onChange={f("maxTrades")} placeholder="No limit" />
             </div>
             <div style={S.fg}>
+              <label style={S.lbl} title="How many positions this bot may hold at the same time. Previously every bot was hard-limited to one, so its trade count over a week was really just a function of how long its average trade stayed open rather than how many setups its strategy found. Each position draws from the same capital pool, so raising this splits capital across trades rather than multiplying your exposure.">Concurrent Positions</label>
+              <input style={S.inp} type="number" min={1} max={10} value={form.maxOpenPositions} onChange={f("maxOpenPositions")} placeholder="1" />
+            </div>
+            <div style={S.fg}>
               <label style={S.lbl}>Mode</label>
               <select style={S.inp} value={form.mode} onChange={f("mode")} disabled={!brokerConnected}>
                 <option value="DEMO">Demo (virtual funds)</option>
@@ -345,7 +351,12 @@ export default function BotsPage({ bots, setBots, tickers, trades, notify }: Pag
                     <span style={{ background: "#ff475718", border: "1px solid #ff4757", color: "#ff4757", fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700 }}>LIVE</span>
                   )}
                   {bot.current_position && (
-                    <span style={{ background: bot.current_position === "LONG" ? "#00d08418" : "#ff475718", border: `1px solid ${bot.current_position === "LONG" ? "#00d084" : "#ff4757"}`, color: bot.current_position === "LONG" ? "#00d084" : "#ff4757", fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700 }}>{bot.current_position}</span>
+                    <span style={{
+                  background: bot.current_position === "LONG" ? "#00d08418" : bot.current_position === "SHORT" ? "#ff475718" : "#ffd70018",
+                  border: `1px solid ${bot.current_position === "LONG" ? "#00d084" : bot.current_position === "SHORT" ? "#ff4757" : "#ffd700"}`,
+                  color: bot.current_position === "LONG" ? "#00d084" : bot.current_position === "SHORT" ? "#ff4757" : "#ffd700",
+                  fontSize: 8, padding: "2px 5px", borderRadius: 3, fontWeight: 700,
+                }}>{bot.current_position}</span>
                   )}
                   <div style={{ display: "flex", alignItems: "center", gap: 3, background: bot.status === "RUNNING" ? "#00d08418" : bot.status === "PAUSED" ? "#ffd70018" : "#2e406018", border: `1px solid ${bot.status === "RUNNING" ? "#00d08444" : bot.status === "PAUSED" ? "#ffd70044" : "#2e406044"}`, borderRadius: 20, padding: "2px 7px" }}>
                     <div style={{ width: 5, height: 5, borderRadius: "50%", background: bot.status === "RUNNING" ? "#00d084" : bot.status === "PAUSED" ? "#ffd700" : "var(--text-mute)" }} />

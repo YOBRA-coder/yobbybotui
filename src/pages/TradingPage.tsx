@@ -2,11 +2,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { PageProps } from "./shared";
 import { KlineUpdate, PAIR_DISPLAY, PAIRS, Trade, type OHLCV } from "../types";
-import { marketApi, tradesApi } from "../api/client";
+import { accountApi, marketApi, tradesApi } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import ProChart, { type OrderBookData } from "../components/ProChart";
 import { S } from "./styles";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import TradeModal from "../components/TradeModal";
 
 // ── Technical Analysis ────────────────────────────────────────────────────────
@@ -37,8 +37,9 @@ function bb(closes: number[], p = 20) {
   return { upper: mean + 2 * std, middle: mean, lower: mean - 2 * std };
 }
 
-export default function TradingPage({ tickers, trades, setTrades, signals, notify }: PageProps) {
+export default function TradingPage({ tickers, trades, setTrades, signals, bots, notify }: PageProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const pair = new URLSearchParams(location.search).get("pair");
   const signalId = new URLSearchParams(location.search).get("signal");
   const backtestTrade = (location.state as any)?.backtestTrade as
@@ -93,6 +94,31 @@ export default function TradingPage({ tickers, trades, setTrades, signals, notif
   const [amount, setAmount] = useState("0.001");
   const [limitPrice, setLimitPrice] = useState("");
   const [loading, setLoading] = useState(false);
+  // "when i place a trade add option to execute in binance" — which venue
+  // this order goes to. Always resets to DEMO, never remembered across
+  // sessions: a sticky "last used = BINANCE" is exactly how someone spends
+  // real money by accident.
+  const [venue, setVenue] = useState<"DEMO" | "BINANCE">("DEMO");
+  const [brokerReady, setBrokerReady] = useState<{ connected: boolean; testnet: boolean; canTrade: boolean } | null>(null);
+  useEffect(() => {
+    if (!auth.token) return;
+    let cancelled = false;
+    accountApi.summary(auth.token)
+      .then(a => {
+        if (cancelled) return;
+        setBrokerReady({
+          connected: a.broker_connected,
+          testnet: a.testnet,
+          canTrade: a.live?.can_trade ?? false,
+        });
+        // Binance was disconnected in Settings while this page was open —
+        // fall back to DEMO rather than leaving a dead venue selected.
+        if (!a.broker_connected) setVenue("DEMO");
+      })
+      .catch(() => { if (!cancelled) setBrokerReady(null); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.token]);
   const [aiText, setAiText] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const ticker = tickers.find(t => t.symbol === sel);
@@ -271,12 +297,21 @@ useEffect(() => {
     try {
       const trade = await tradesApi.place(auth.token, {
         pair: sel, side, amount: parseFloat(amount),
-        order_type: orderType,
+        order_type: orderType, venue,
         ...(orderType === "limit" && limitPrice ? { limit_price: parseFloat(limitPrice) } : {}),
       });
       setTrades(prev => [trade, ...prev]);
       if (typeof (trade as any).balance === "number") updateUser({ balance: (trade as any).balance });
-      notify(`${side} filled: ${amount} ${PAIR_DISPLAY[sel]} @ $${trade.price.toFixed(2)}`, "success");
+      // The fill price and size that come back from a BINANCE order are the
+      // exchange's actual fill, not what was quoted — say so, since a market
+      // order routinely fills a little away from the last price and can
+      // fill partially.
+      notify(
+        venue === "BINANCE"
+          ? `${side} executed on Binance: ${trade.amount} ${PAIR_DISPLAY[sel]} @ $${trade.price.toFixed(2)}`
+          : `${side} filled (demo): ${amount} ${PAIR_DISPLAY[sel]} @ $${trade.price.toFixed(2)}`,
+        "success",
+      );
     } catch (e: any) {
       notify(e.message, "error");
     }
@@ -319,6 +354,55 @@ useEffect(() => {
             ))}
           </div>
         )}
+        {/* Venue selector — demo paper wallet vs the real connected Binance
+            account. Deliberately the FIRST control in the order panel and
+            visually loud when set to Binance: the difference between these
+            two is real money, and it should never be something you discover
+            after clicking Buy. */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 11 }}>
+          {([
+            ["DEMO", "Demo wallet"],
+            ["BINANCE", brokerReady?.testnet ? "Binance (testnet)" : "Binance (real)"],
+          ] as const).map(([v, label]) => {
+            const disabled = v === "BINANCE" && !brokerReady?.connected;
+            const active = venue === v;
+            const hot = v === "BINANCE";
+            return (
+              <button key={v} disabled={disabled}
+                onClick={() => setVenue(v)}
+                title={disabled ? "Connect your Binance API keys in Settings to trade live" : undefined}
+                style={{
+                  flex: 1, padding: "7px 4px", borderRadius: 6, fontSize: 10, fontFamily: "inherit",
+                  cursor: disabled ? "not-allowed" : "pointer", fontWeight: 700,
+                  background: active ? (hot ? "#ffd70022" : "#0094ff22") : "var(--surface)",
+                  border: `1px solid ${active ? (hot ? "#ffd700" : "#0094ff") : "var(--border)"}`,
+                  color: active ? (hot ? "#ffd700" : "#0094ff") : "var(--text-dim)",
+                  opacity: disabled ? 0.45 : 1,
+                }}>{label}</button>
+            );
+          })}
+        </div>
+        {venue === "BINANCE" && (
+          <div style={{
+            background: brokerReady?.testnet ? "#0094ff12" : "#ffd70012",
+            border: `1px solid ${brokerReady?.testnet ? "#0094ff44" : "#ffd70044"}`,
+            borderRadius: 7, padding: "7px 9px", marginBottom: 11,
+            fontSize: 9, lineHeight: 1.5, color: "var(--text-dim)",
+          }}>
+            {brokerReady?.testnet
+              ? "Testnet — this sends a real signed order to Binance's sandbox using fake funds."
+              : "This sends a real market order to your Binance account using real funds."}
+            {brokerReady && !brokerReady.canTrade && (
+              <div style={{ color: "#ff4757", marginTop: 4 }}>
+                Your API key reports trading disabled — enable Spot Trading on the key in Binance first.
+              </div>
+            )}
+            <div style={{ marginTop: 4 }}>
+              Stop loss / take profit are monitored by this app, not held as orders on Binance — they only
+              trigger while the backend is running.
+            </div>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 5, marginBottom: 11 }}>
           {(["BUY", "SELL"] as const).map(s => (
             <button key={s} style={{ flex: 1, padding: 9, borderRadius: 7, cursor: "pointer", fontWeight: 800, fontSize: 12, fontFamily: "inherit", border: `1px solid ${side === s ? (s === "BUY" ? "#00d084" : "#ff4757") : "var(--border)"}`, background: side === s ? (s === "BUY" ? "#00d084" : "#ff4757") : "var(--surface)", color: side === s ? "#000" : "var(--text-dim)" }} onClick={() => setSide(s)}>{s}</button>
@@ -341,7 +425,9 @@ useEffect(() => {
         )}
         {ticker && <div style={{ color: "var(--text-mute)", fontSize: 10, marginBottom: 10 }}>Total ≈ <span style={{ color: "var(--text)" }}>${(parseFloat(amount) * ticker.price || 0).toFixed(2)}</span></div>}
         <button style={{ ...S.btn, background: side === "BUY" ? "#00d084" : "#ff4757", fontWeight: 800 }} onClick={handleOrder} disabled={loading}>
-          {loading ? "Processing..." : `${side} ${PAIR_DISPLAY[sel]}`}
+          {loading
+            ? "Processing..."
+            : `${side} ${PAIR_DISPLAY[sel]}${venue === "BINANCE" ? " on Binance" : ""}`}
         </button>
       </>
     );
@@ -560,6 +646,10 @@ useEffect(() => {
       timeframe={iv}
       onTimeframeChange={setIv}
       onTradeClick={setSelectedTrade}
+      // "show which bot is active in charts" — ProChart filters this to the
+      // bots configured on the pair currently being viewed.
+      bots={bots}
+      onBotClick={(botId) => navigate(`/bot/${botId}`)}
       orderBook={orderBook}
       signalOverlay={signalOverlay}
       backtestOverlay={backtestOverlay}

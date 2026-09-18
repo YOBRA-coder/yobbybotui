@@ -48,11 +48,42 @@ export default function DashboardPage({ tickers, signals, bots, trades }: PagePr
   const topMover = tickers.length
     ? tickers.reduce((a, b) => Math.abs(b.changePct) > Math.abs(a.changePct) ? b : a)
     : null;
+
+  // Volatility = average ABSOLUTE move across tracked pairs. avgChange
+  // alone can't distinguish a dead-flat market from a violent one where
+  // gainers and losers cancel out — which is exactly the market state you
+  // most want to know about before turning bots loose.
+  const volatility = tickers.length
+    ? tickers.reduce((s, t) => s + Math.abs(t.changePct), 0) / tickers.length
+    : 0;
+
+  // Bot consensus: what the RUNNING bots are actually reading right now
+  // (bots.market_signal is refreshed every simulation cycle whether or not
+  // the bot trades). This is the honest answer to "what does my system
+  // think" — far more useful than a decorative sentiment score, because
+  // it's the same number the bots make decisions on.
+  const runningBots = bots.filter(b => b.status === "RUNNING");
+  const botBuy = runningBots.filter(b => b.market_signal === "BUY").length;
+  const botSell = runningBots.filter(b => b.market_signal === "SELL").length;
+  const botHold = runningBots.filter(b => b.market_signal === "HOLD").length;
+
+  // Live exposure — capital currently at risk in open positions, split by
+  // whether it's real money or paper. "Total P&L" above nets everything
+  // together, which hides the fact that some of it is real.
+  const openTrades = trades.filter(t => t.status === "FILLED");
+  const realExposure = openTrades.filter(t => t.live).reduce((s, t) => s + t.total, 0);
+  const demoExposure = openTrades.filter(t => !t.live).reduce((s, t) => s + t.total, 0);
+
+  // Breadth is a share, not a raw count — 6▲/4▼ and 60▲/40▼ are the same
+  // market condition and should read the same.
+  const breadthPct = tickers.length ? (gainers / tickers.length) * 100 : 0;
+
   const pulseLabel = tickers.length === 0 ? "—"
     : gainers > losers && avgChange > 0.2 ? "Bullish"
     : losers > gainers && avgChange < -0.2 ? "Bearish"
     : "Mixed";
   const pulseColor = pulseLabel === "Bullish" ? "#00d084" : pulseLabel === "Bearish" ? "#ff4757" : "#ffd700";
+  const volLabel = volatility < 1 ? "Quiet" : volatility < 3 ? "Normal" : volatility < 6 ? "Active" : "Volatile";
 
   return (
     <div style={{ animation: "fadeUp .3s ease" }}>
@@ -81,31 +112,84 @@ export default function DashboardPage({ tickers, signals, bots, trades }: PagePr
         {tickers.length === 0 ? (
           <div style={{ color: "var(--text-mute)", fontSize: 11, padding: 10, textAlign: "center" }}>Connecting to market data...</div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 12 }}>
-            <div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Breadth</div>
-              <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4 }}>
-                <span style={{ color: "#00d084" }}>{gainers}▲</span> <span style={{ color: "var(--text-mute)" }}>/</span> <span style={{ color: "#ff4757" }}>{losers}▼</span>
+          <>
+            {/* Breadth bar — the share of tracked pairs that are green,
+                shown as a proportion rather than two raw counts. */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, marginBottom: 4 }}>
+                <span style={{ color: "#00d084", fontWeight: 700 }}>{gainers} up</span>
+                <span style={{ color: "var(--text-mute)" }}>{breadthPct.toFixed(0)}% breadth</span>
+                <span style={{ color: "#ff4757", fontWeight: 700 }}>{losers} down</span>
               </div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, marginTop: 2 }}>of {tickers.length} pairs</div>
+              <div style={{ display: "flex", height: 5, borderRadius: 3, overflow: "hidden", background: "var(--border)" }}>
+                <div style={{ width: `${breadthPct}%`, background: "#00d084", transition: "width .4s ease" }} />
+                <div style={{ flex: 1, background: "#ff4757" }} />
+              </div>
             </div>
-            <div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Avg 24h Move</div>
-              <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: avgChange >= 0 ? "#00d084" : "#ff4757" }}>{avgChange >= 0 ? "+" : ""}{avgChange.toFixed(2)}%</div>
+
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap: 12 }}>
+              <div>
+                <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Avg 24h Move</div>
+                <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: avgChange >= 0 ? "#00d084" : "#ff4757" }}>{avgChange >= 0 ? "+" : ""}{avgChange.toFixed(2)}%</div>
+                <div style={{ color: "var(--text-mute)", fontSize: 9, marginTop: 2 }}>across {tickers.length} pairs</div>
+              </div>
+
+              <div title="Average absolute 24h move — how much the market is actually moving, regardless of direction">
+                <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Volatility</div>
+                <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: "var(--text)" }}>{volatility.toFixed(2)}%</div>
+                <div style={{ color: volatility >= 6 ? "#ff4757" : volatility >= 3 ? "#ffd700" : "var(--text-mute)", fontSize: 9, marginTop: 2, fontWeight: 700 }}>{volLabel}</div>
+              </div>
+
+              {topMover && (
+                <div style={{ cursor: "pointer" }} onClick={() => navigate('/trading?pair=' + topMover.symbol)}>
+                  <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Biggest Mover</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: "var(--text)" }}>{PAIR_DISPLAY[topMover.symbol] || topMover.symbol}</div>
+                  <div style={{ fontSize: 10, marginTop: 2, color: topMover.changePct >= 0 ? "#00d084" : "#ff4757", fontWeight: 700 }}>{topMover.changePct >= 0 ? "▲" : "▼"}{Math.abs(topMover.changePct).toFixed(2)}%</div>
+                </div>
+              )}
+
+              {/* What the running bots are currently reading — the same
+                  signal they'd act on, not a decorative sentiment score. */}
+              <div title="What your running bots are currently reading from the market">
+                <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Bot Consensus</div>
+                {runningBots.length === 0 ? (
+                  <div style={{ fontSize: 12, fontWeight: 700, marginTop: 4, color: "var(--text-mute)" }}>No bots running</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 700, marginTop: 4, display: "flex", gap: 8 }}>
+                      <span style={{ color: "#00d084" }}>{botBuy} buy</span>
+                      <span style={{ color: "#ff4757" }}>{botSell} sell</span>
+                      <span style={{ color: "var(--text-mute)" }}>{botHold} hold</span>
+                    </div>
+                    <div style={{ color: "var(--text-mute)", fontSize: 9, marginTop: 2 }}>{runningBots.length} of {bots.length} active</div>
+                  </>
+                )}
+              </div>
             </div>
-            {topMover && (
-              <div style={{ cursor: "pointer" }} onClick={() => navigate('/trading?pair=' + topMover.symbol)}>
-                <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Biggest Mover</div>
-                <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: "var(--text)" }}>{PAIR_DISPLAY[topMover.symbol] || topMover.symbol}</div>
-                <div style={{ fontSize: 10, marginTop: 2, color: topMover.changePct >= 0 ? "#00d084" : "#ff4757", fontWeight: 700 }}>{topMover.changePct >= 0 ? "▲" : "▼"}{Math.abs(topMover.changePct).toFixed(2)}%</div>
+
+            {/* Exposure — real money and paper money kept visibly separate,
+                since the headline P&L above nets them together. */}
+            {(realExposure > 0 || demoExposure > 0) && (
+              <div style={{ display: "flex", gap: 16, marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+                <div style={{ fontSize: 10 }}>
+                  <span style={{ color: "var(--text-mute)", fontWeight: 700, letterSpacing: 1 }}>OPEN EXPOSURE </span>
+                  <span style={{ color: "var(--text)", fontWeight: 700 }}>{openTrades.length} position{openTrades.length === 1 ? "" : "s"}</span>
+                </div>
+                {realExposure > 0 && (
+                  <div style={{ fontSize: 10 }}>
+                    <span style={{ color: "#ffd700", fontWeight: 800, letterSpacing: 1 }}>LIVE </span>
+                    <span style={{ color: "var(--text)", fontWeight: 700, fontFamily: "monospace" }}>${realExposure.toFixed(2)}</span>
+                  </div>
+                )}
+                {demoExposure > 0 && (
+                  <div style={{ fontSize: 10 }}>
+                    <span style={{ color: "var(--text-mute)", fontWeight: 800, letterSpacing: 1 }}>DEMO </span>
+                    <span style={{ color: "var(--text)", fontWeight: 700, fontFamily: "monospace" }}>${demoExposure.toFixed(2)}</span>
+                  </div>
+                )}
               </div>
             )}
-            <div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Active Bots Watching</div>
-              <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: "#0094ff" }}>{activeBots}</div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, marginTop: 2 }}>of {bots.length} total</div>
-            </div>
-          </div>
+          </>
         )}
       </div>
       {isMobile && (

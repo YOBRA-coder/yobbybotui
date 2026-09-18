@@ -52,7 +52,14 @@ export default function TradeModal({ trade, currentPrice, token, onClose, onUpda
         take_profit: tp === "" ? undefined : parseFloat(tp),
       });
       onUpdate(updated);
-      notifySafe("Stop loss / take profit updated", "success");
+      notifySafe(
+        updated.sl_tp_venue === "EXCHANGE"
+          ? "Stop loss / take profit updated and placed on Binance"
+          : trade.live
+            ? "Stop loss / take profit updated — monitored by the app, not resting on Binance"
+            : "Stop loss / take profit updated",
+        "success",
+      );
       onClose();
     } catch (e: any) {
       notifySafe(e.message || "Failed to update trade", "error");
@@ -98,6 +105,43 @@ export default function TradeModal({ trade, currentPrice, token, onClose, onUpda
             ✕
           </button>
         </div>
+
+        {/* Real money vs paper, and — for a live trade — whether the exits
+            are actually resting on Binance or only being watched by this
+            app. Both were previously invisible here, so a live position and
+            a demo one looked identical in the one dialog you use to close
+            them. */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          <span style={{
+            fontSize: 9, fontWeight: 800, letterSpacing: 1, padding: "3px 8px", borderRadius: 4,
+            background: trade.live ? "#ffd70018" : "var(--surface2)",
+            border: `1px solid ${trade.live ? "#ffd70055" : "var(--border)"}`,
+            color: trade.live ? "#ffd700" : "var(--text-mute)",
+          }}>{trade.live ? "LIVE · BINANCE" : "DEMO"}</span>
+          {trade.live && trade.status !== "CLOSED" && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: 1, padding: "3px 8px", borderRadius: 4,
+              background: trade.exchange_order_list_id ? "#00d08415" : "#ff475715",
+              border: `1px solid ${trade.exchange_order_list_id ? "#00d08455" : "#ff475755"}`,
+              color: trade.exchange_order_list_id ? "#00d084" : "#ff4757",
+            }}>
+              {trade.exchange_order_list_id ? "STOP ON EXCHANGE" : "APP-MONITORED STOP"}
+            </span>
+          )}
+        </div>
+
+        {trade.live && trade.status !== "CLOSED" && !trade.exchange_order_list_id && (
+          <div style={{
+            background: "#ff475710", border: "1px solid #ff475740", borderRadius: 8,
+            padding: "8px 11px", marginBottom: 14, color: "var(--text-dim)", fontSize: 10, lineHeight: 1.5,
+          }}>
+            This position's stop and target are not resting on Binance — they only trigger while this app's
+            backend is running. Set BOTH a stop loss and a take profit below to place a real exchange order.
+            {trade.exchange_exit_error && (
+              <div style={{ color: "#ff4757", marginTop: 5 }}>Binance said: {trade.exchange_exit_error}</div>
+            )}
+          </div>
+        )}
 
         {trade.reason && (
           <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 11px", marginBottom: 14, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
