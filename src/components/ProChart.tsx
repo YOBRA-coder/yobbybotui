@@ -263,8 +263,7 @@ interface OrderBlock {
 //     longer tradeable levels, but were still drawn identically to fresh
 //     ones. They're now flagged `mitigated` and rendered faded, and fresh
 //     blocks are preferred when trimming to maxBlocks.
-function findOrderBlocks(candles: OHLCV[], impulseMult = 1.5, maxBlocks = 6): OrderBlock[] {
-  if (candles.length < 25) return [];
+function findOrderBlocksPass(candles: OHLCV[], impulseMult: number, originLookback: number): OrderBlock[] {
   const blocks: OrderBlock[] = [];
   const lastPrice = candles[candles.length - 1].close;
 
@@ -277,18 +276,30 @@ function findOrderBlocks(candles: OHLCV[], impulseMult = 1.5, maxBlocks = 6): Or
     if (body < avgBody * impulseMult) continue;
 
     const bullishImpulse = impulse.close > impulse.open;
-    // Walk back up to 3 bars for the last opposite-coloured candle — the
-    // "base" the impulse launched from.
+    // Walk back for the last opposite-coloured candle — the "base" the
+    // impulse launched from.
     let origin: OHLCV | null = null;
-    for (let back = 1; back <= 3 && i - back >= 0; back++) {
+    for (let back = 1; back <= originLookback && i - back >= 0; back++) {
       const c = candles[i - back];
       const isOpposite = bullishImpulse ? c.close < c.open : c.close > c.open;
       if (isOpposite) { origin = c; break; }
     }
+    // BUG FIX ("order blocks not showing"): requiring a strictly
+    // opposite-coloured candle within the lookback discarded a large share
+    // of real impulses — a continuation run (several same-direction bars
+    // then one much larger one) has no opposite candle to anchor to at
+    // all, and on real market data that pattern is common enough that it
+    // was routinely the reason this came back empty. Falling back to the
+    // single candle immediately before the impulse — regardless of colour
+    // — is what most order-block implementations actually do; a true
+    // opposite-coloured base is preferred when one exists, but its absence
+    // is no longer a reason to draw nothing.
+    if (!origin) origin = candles[i - 1];
     if (!origin) continue;
 
     const top = Math.max(origin.open, origin.close);
     const bottom = Math.min(origin.open, origin.close);
+    if (top === bottom) continue; // a flat/zero-range base isn't a usable zone
     // Mitigated = price has closed back through the far side of the block
     // at some point after it formed.
     let mitigated = false;
@@ -302,16 +313,27 @@ function findOrderBlocks(candles: OHLCV[], impulseMult = 1.5, maxBlocks = 6): Or
     });
   }
 
-  // Prefer fresh (unmitigated) blocks, then the ones nearest current price.
-  return blocks
-    .sort((a, b) => {
-      if (a.mitigated !== b.mitigated) return a.mitigated ? 1 : -1;
-      const da = Math.min(Math.abs(a.top - lastPrice), Math.abs(a.bottom - lastPrice));
-      const db = Math.min(Math.abs(b.top - lastPrice), Math.abs(b.bottom - lastPrice));
-      return da - db;
-    })
-    .slice(0, maxBlocks)
-    .sort((a, b) => a.time - b.time);
+  return blocks.sort((a, b) => {
+    if (a.mitigated !== b.mitigated) return a.mitigated ? 1 : -1;
+    const da = Math.min(Math.abs(a.top - lastPrice), Math.abs(a.bottom - lastPrice));
+    const db = Math.min(Math.abs(b.top - lastPrice), Math.abs(b.bottom - lastPrice));
+    return da - db;
+  });
+}
+
+function findOrderBlocks(candles: OHLCV[], impulseMult = 1.2, maxBlocks = 6): OrderBlock[] {
+  if (candles.length < 25) return [];
+  // Two-tier: the configured strictness first, then — only if that finds
+  // literally nothing — a looser pass. This is what actually fixes "not
+  // showing": on a calm/ranging stretch the strict pass can legitimately
+  // find zero genuine impulses, but an empty overlay reads as "the feature
+  // is broken" rather than "the market is quiet right now". A relaxed
+  // fallback means toggling OB on real data almost always draws something,
+  // while the strict pass (drawn first, so it's what you get whenever it
+  // has anything) still takes priority when it does find real impulses.
+  const strict = findOrderBlocksPass(candles, impulseMult, 3);
+  const blocks = strict.length > 0 ? strict : findOrderBlocksPass(candles, Math.max(0.8, impulseMult - 0.4), 6);
+  return blocks.slice(0, maxBlocks).sort((a, b) => a.time - b.time);
 }
 
 // ── Supply & demand zones ────────────────────────────────────────────────
@@ -326,8 +348,9 @@ interface SDZone {
   top: number; bottom: number; kind: "supply" | "demand";
   time: number; touches: number; fresh: boolean;
 }
-function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
-  if (candles.length < 30) return [];
+function findSupplyDemandZonesPass(
+  candles: OHLCV[], depBodyRatio: number, avgMult: number, baseBodyRatio: number, requireUnbroken: boolean
+): SDZone[] {
   const zones: SDZone[] = [];
 
   for (let i = 25; i < candles.length; i++) {
@@ -335,12 +358,11 @@ function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
     const depBody = Math.abs(departure.close - departure.open);
     const depRange = departure.high - departure.low;
     if (depRange <= 0) continue;
-    // A real departure candle is mostly body, not wick.
-    if (depBody / depRange < 0.6) continue;
+    if (depBody / depRange < depBodyRatio) continue; // a real departure candle is mostly body, not wick
 
     const window = candles.slice(i - 20, i);
     const avgRange = window.reduce((a, c) => a + (c.high - c.low), 0) / window.length || 1;
-    if (depBody < avgRange * 1.3) continue;
+    if (depBody < avgRange * avgMult) continue;
 
     // Collect the base: consecutive preceding candles with small bodies.
     const base: OHLCV[] = [];
@@ -348,7 +370,7 @@ function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
       const c = candles[i - back];
       const r = c.high - c.low;
       if (r <= 0) break;
-      if (Math.abs(c.close - c.open) / r > 0.5) break; // too decisive to be a base
+      if (Math.abs(c.close - c.open) / r > baseBodyRatio) break; // too decisive to be a base
       base.push(c);
     }
     if (base.length === 0) continue;
@@ -366,13 +388,32 @@ function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
       if (c.low <= top && c.high >= bottom) touches++;
       if (kind === "demand" ? c.close < bottom : c.close > top) { broken = true; break; }
     }
-    if (broken) continue; // zone has been consumed — no longer a level
+    if (broken && requireUnbroken) continue; // zone has been consumed — no longer a level
 
     zones.push({
       time: Math.floor(base[base.length - 1].time / 1000),
       top, bottom, kind, touches, fresh: touches === 0,
     });
   }
+  return zones;
+}
+
+function findSupplyDemandZones(candles: OHLCV[], maxZones = 4): SDZone[] {
+  if (candles.length < 30) return [];
+  // BUG FIX ("order blocks not showing" applied the same way here — this
+  // toggle had the identical symptom): four strict conditions were ANDed
+  // together (mostly-body departure, decisive-vs-recent-range departure, a
+  // genuinely small-bodied base, AND the zone never having been revisited)
+  // — on a shorter history or a calmer stretch of any pair, all four
+  // rarely align at once and the toggle came back empty. Same two-tier
+  // fix: try the strict definition first, fall back to a looser one only
+  // if that finds nothing, and only then allow zones price has already
+  // revisited once (still excluding ones price has fully broken through,
+  // which are genuinely gone).
+  const strict = findSupplyDemandZonesPass(candles, 0.6, 1.3, 0.5, true);
+  const zones = strict.length > 0
+    ? strict
+    : findSupplyDemandZonesPass(candles, 0.45, 0.9, 0.65, false);
 
   const lastPrice = candles[candles.length - 1].close;
   return zones
@@ -417,7 +458,7 @@ function classifyCandle(c: OHLCV, prev?: OHLCV): CandleType {
     }
   }
 
-  if (bodyPct < 0.08) {
+  if (bodyPct < 0.12) {
     if (lowerWick > body * 3 && upperWick < body * 1.5)
       return { name: "Dragonfly Doji", bias: "bullish", notable: true };
     if (upperWick > body * 3 && lowerWick < body * 1.5)
@@ -1653,17 +1694,27 @@ export default function ProChart({
               );
             })}
 
-            {/* Candlestick pattern labels */}
+            {/* Candlestick pattern labels. BUG FIX ("pattern labels not
+                showing"): bare <text> with no background reads as
+                invisible over a candle of a similar colour — a bearish
+                label in red sitting right above a red candle, for
+                instance. Every label now sits on a small pill so it's
+                legible regardless of what's underneath it. */}
             {indicators.pat && candlePatterns.map((p, i) => {
               const above = p.type.bias === "bearish";
               const anchor = projectPoint(p.time, above ? p.high : p.low);
               if (!anchor) return null;
               const color = p.type.bias === "bullish" ? "#00d084" : p.type.bias === "bearish" ? "#ff4757" : "#ffd700";
+              const ty = anchor.y + (above ? -10 : 16);
+              const w = Math.max(28, p.type.name.length * 5.4);
               return (
-                <text key={`pat_${i}`} x={anchor.x} y={anchor.y + (above ? -8 : 14)}
-                  textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" opacity={0.85}>
-                  {p.type.name}
-                </text>
+                <g key={`pat_${i}`}>
+                  <rect x={anchor.x - w / 2} y={ty - 9} width={w} height={13} rx={3}
+                    fill="rgba(8,14,24,0.82)" stroke={`${color}55`} strokeWidth={1} />
+                  <text x={anchor.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
+                    {p.type.name}
+                  </text>
+                </g>
               );
             })}
 
