@@ -28,7 +28,7 @@ export default function BotDetails({
   const [editForm, setEditForm] = useState({
     name: "", strategy: "", pair: "", mode: "DEMO" as "DEMO" | "LIVE",
     timeframe: "15m", confidenceThreshold: "65", cooldownMinutes: "0", autoPauseAfterLosses: "4",
-    maxTrades: "",
+    maxTrades: "", maxOpenPositions: "1",
   });
   const [saving, setSaving] = useState(false);
   const [brokerConnected, setBrokerConnected] = useState(false);
@@ -53,6 +53,7 @@ export default function BotDetails({
           cooldownMinutes: String(detail.cooldown_minutes ?? 0),
           autoPauseAfterLosses: String(detail.auto_pause_after_losses ?? 4),
           maxTrades: detail.max_trades ? String(detail.max_trades) : "",
+          maxOpenPositions: String(detail.max_open_positions ?? 1),
         });
         // BUG FIX: this fetch returns the freshest copy of the bot —
         // including market_signal/market_confidence/volatility_pct/
@@ -113,6 +114,7 @@ export default function BotDetails({
         cooldown_minutes: parseInt(editForm.cooldownMinutes, 10) || 0,
         auto_pause_after_losses: editForm.autoPauseAfterLosses !== "" ? parseInt(editForm.autoPauseAfterLosses, 10) : 4,
         max_trades: editForm.maxTrades ? parseInt(editForm.maxTrades, 10) : 0,
+        max_open_positions: parseInt(editForm.maxOpenPositions, 10) || 1,
         ...(editForm.pair !== bot.pair ? { pair: editForm.pair } : {}),
         ...(editForm.mode !== bot.mode ? { mode: editForm.mode } : {}),
       });
@@ -303,6 +305,14 @@ export default function BotDetails({
           <div style={S.fg}>
             <label style={S.lbl} title="Auto-pauses this bot once its total trade count reaches this number, regardless of performance. Leave blank for no limit.">Stop After N Trades</label>
             <input style={S.inp} type="number" min={0} value={editForm.maxTrades} onChange={e => setEditForm(p => ({ ...p, maxTrades: e.target.value }))} placeholder="No limit" />
+          </div>
+          <div style={S.fg}>
+            {/* This was the actual gap: creating a NEW bot let you set
+                concurrent positions, but there was no way at all to change
+                it on a bot you'd already created — which, for anyone
+                testing this feature, is every bot they have. */}
+            <label style={S.lbl} title="How many positions this bot may hold at the same time. Each position draws from the same capital pool, so raising this splits capital across trades rather than multiplying exposure.">Concurrent Positions</label>
+            <input style={S.inp} type="number" min={1} max={10} value={editForm.maxOpenPositions} onChange={e => setEditForm(p => ({ ...p, maxOpenPositions: e.target.value }))} placeholder="1" />
           </div>
           <button style={{ ...S.btn, width: "auto", padding: "9px 18px" }} onClick={saveEdits} disabled={saving}>
             {saving ? "Saving..." : "Save Changes"}

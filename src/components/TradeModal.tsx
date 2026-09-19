@@ -11,9 +11,14 @@ interface TradeModalProps {
   onClose: () => void;
   onUpdate: (updated: Trade) => void;
   notify?: (msg: string, kind: "success" | "error" | "info") => void;
+  // Closing a LIVE trade (or placing/replacing its exchange OCO) moves
+  // real Binance balance — this lets the caller refresh the top-bar
+  // equity/P&L pill immediately instead of it sitting stale until the
+  // next scheduled poll.
+  onAccountChange?: () => void;
 }
 
-export default function TradeModal({ trade, currentPrice, token, onClose, onUpdate, notify }: TradeModalProps) {
+export default function TradeModal({ trade, currentPrice, token, onClose, onUpdate, notify, onAccountChange }: TradeModalProps) {
 
   const { updateUser } = useAuth();
   const [tp, setTp] = useState(trade.take_profit != null ? String(trade.take_profit) : "")
@@ -52,6 +57,7 @@ export default function TradeModal({ trade, currentPrice, token, onClose, onUpda
         take_profit: tp === "" ? undefined : parseFloat(tp),
       });
       onUpdate(updated);
+      if (trade.live) onAccountChange?.();
       notifySafe(
         updated.sl_tp_venue === "EXCHANGE"
           ? "Stop loss / take profit updated and placed on Binance"
@@ -74,6 +80,7 @@ export default function TradeModal({ trade, currentPrice, token, onClose, onUpda
       const closed = await tradesApi.close(token, trade.id);
       onUpdate(closed);
       if (typeof (closed as any).balance === "number") updateUser({ balance: (closed as any).balance });
+      if (trade.live) onAccountChange?.();
       notifySafe(`Position closed — realized P&L $${closed.pnl.toFixed(2)}`, "info");
       onClose();
     } catch (e: any) {

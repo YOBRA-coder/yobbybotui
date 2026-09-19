@@ -37,7 +37,7 @@ function bb(closes: number[], p = 20) {
   return { upper: mean + 2 * std, middle: mean, lower: mean - 2 * std };
 }
 
-export default function TradingPage({ tickers, trades, setTrades, signals, bots, notify }: PageProps) {
+export default function TradingPage({ tickers, trades, setTrades, signals, bots, notify, refreshAccount }: PageProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const pair = new URLSearchParams(location.search).get("pair");
@@ -302,6 +302,10 @@ useEffect(() => {
       });
       setTrades(prev => [trade, ...prev]);
       if (typeof (trade as any).balance === "number") updateUser({ balance: (trade as any).balance });
+      // Don't wait for the top bar's 30s poll to show a live order's
+      // effect on real Binance equity/P&L — this is the exact "placed a
+      // live trade... but balance shows [unchanged]" complaint.
+      if (venue === "BINANCE") refreshAccount();
       // The fill price and size that come back from a BINANCE order are the
       // exchange's actual fill, not what was quoted — say so, since a market
       // order routinely fills a little away from the last price and can
@@ -670,6 +674,7 @@ useEffect(() => {
         currentPrice={candles[candles.length - 1]?.close || 0}
         token={auth.token}
         notify={notify}
+        onAccountChange={refreshAccount}
         onClose={() => setSelectedTrade(null)}
         onUpdate={(updated) => {
           setTrades(prev =>

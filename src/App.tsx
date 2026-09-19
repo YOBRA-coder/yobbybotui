@@ -105,21 +105,29 @@ function MainShell() {
   // A failure here is non-fatal — the pill just shows "offline" and the
   // rest of the app carries on.
   const [account, setAccount] = useState<Awaited<ReturnType<typeof accountApi.summary>> | null>(null);
+  // Pulled out of the polling effect so a trade can trigger an IMMEDIATE
+  // refresh instead of waiting up to 30s to see it — see the NEW_TRADE
+  // handler below. "placed a live trade, it's connected and balance
+  // shows, but nothing changes" was this: the order genuinely went to
+  // Binance, but the top-bar equity/P&L pill only repainted on its next
+  // scheduled poll, so a trade placed right after a refresh could sit for
+  // up to 30 seconds looking exactly like nothing had happened.
+  const refreshAccount = useCallback(async () => {
+    if (!auth.token) return;
+    try {
+      const data = await accountApi.summary(auth.token);
+      setAccount(data);
+    } catch {
+      // Leave the previous snapshot in place rather than blanking the
+      // pill on a single transient failure.
+    }
+  }, [auth.token]);
   useEffect(() => {
     if (!auth.token) { setAccount(null); return; }
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const data = await accountApi.summary(auth.token!);
-        if (!cancelled) setAccount(data);
-      } catch {
-        // Leave the previous snapshot in place rather than blanking the
-        // pill on a single transient failure.
-      }
-    };
-    load();
-    const id = setInterval(load, 30000);
-    return () => { cancelled = true; clearInterval(id); };
+    refreshAccount();
+    const id = setInterval(refreshAccount, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth.token]);
 
   const notify = useCallback((msg: string, type: "success" | "error" | "info" = "info") => {
@@ -172,6 +180,11 @@ function MainShell() {
     onBotsUpdate: (b) => setBots(b),
     onNewTrade: (t) => {
       setTrades(prev => [t, ...prev.slice(0, 499)]);
+      // Any trade — bot-placed, exchange-reconciled, or (via the REST
+      // response path below) manually placed — can move real Binance
+      // equity or this app's own live P&L. Refresh immediately rather
+      // than waiting for the next 30s poll; see refreshAccount above.
+      if (t.live) refreshAccount();
       // "alert when a bot places a trade every time" — there was no
       // notification at all here before, bot or manual, entry or exit.
       // Gated by the Settings > Alerts toggle (defaults on) so it's not
@@ -232,7 +245,7 @@ function MainShell() {
   ];
 
 
-  const pp = { tickers, signals, setSignals, bots, setBots, trades, setTrades, strategies, setStrategies, notify };
+  const pp = { tickers, signals, setSignals, bots, setBots, trades, setTrades, strategies, setStrategies, notify, refreshAccount };
 
   const statusColor = wsStatus === "live" ? "#00d084" : wsStatus === "offline" ? "#ff4757" : "#ffd700";
   const currentPage =
