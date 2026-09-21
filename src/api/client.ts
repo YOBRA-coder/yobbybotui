@@ -1,7 +1,7 @@
 // api/client.ts — Typed API client for NexusAI Python backend
 
 import type {
-  User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult, SMCResponse,
+  User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult, SMCResponse, BotLog,
 } from "../types";
 
 // FIX: this was hardcoded to "https://cryptobotapi.onrender.com" — a stale
@@ -94,6 +94,17 @@ export const botsApi = {
     req<Bot>(`/bots/${id}`, { method: "PATCH", body: JSON.stringify(data) }, token),
   delete: (token: string, id: string) =>
     req<{ ok: boolean }>(`/bots/${id}`, { method: "DELETE" }, token),
+  // Activity log — what each bot looked at and decided, step by step.
+  // `sinceId` returns only rows newer than the last one already held, so
+  // polling is cheap. Oldest-first: just append.
+  logsFeed: (token: string, opts: { pair?: string; sinceId?: number; limit?: number } = {}) =>
+    req<BotLog[]>(
+      `/bots/logs/feed?since_id=${opts.sinceId ?? 0}&limit=${opts.limit ?? 150}` +
+        (opts.pair ? `&pair=${encodeURIComponent(opts.pair)}` : ""),
+      {}, token,
+    ),
+  logs: (token: string, id: string, opts: { sinceId?: number; limit?: number } = {}) =>
+    req<BotLog[]>(`/bots/${id}/logs?since_id=${opts.sinceId ?? 0}&limit=${opts.limit ?? 200}`, {}, token),
   // "which strategy is the best...can i create a bot that confirms from
   // all or selected strategies" — ad-hoc backtest for a Confluence combo,
   // not tied to a saved bot, so it can be checked before creating one.

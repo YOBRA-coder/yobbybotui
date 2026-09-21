@@ -49,6 +49,29 @@ export interface SMCFVG { top: number; bottom: number; kind: "bullish" | "bearis
 export interface SMCSwing { time: number; price: number; kind: "high" | "low"; label: "HH" | "LH" | "HL" | "LL" | null }
 export interface SMCSweep { time: number; level: number; wick: number; kind: "bullish" | "bearish" }
 export interface SMCPoi { top: number; bottom: number; time: number; kind: "bullish" | "bearish"; source: string }
+// Price returned into a still-live zone. `confirmed` = closed back out of it
+// (a rejection, not just a touch); `active` = the newest bar is doing it now.
+export interface SMCRetest {
+  time: number; kind: "bullish" | "bearish"; source: "OB" | "FVG" | "S/D" | string;
+  top: number; bottom: number; zone_time: number; confirmed: boolean; active: boolean;
+}
+// One line of the strategy's working. pass = met, wait = not met yet,
+// block = a hard filter vetoing entries, info = context.
+export interface SMCDecisionStep {
+  step: "DATA" | "STRUCTURE" | "SWEEP" | "ZONES" | "RETEST" | "DECISION" | string;
+  status: "pass" | "wait" | "block" | "info";
+  message: string;
+  sig?: string;
+}
+export interface SMCDecision {
+  type: "BUY" | "HOLD";
+  confidence: number;
+  reason: string;
+  trigger: string | null;
+  invalidation: number | null;
+  trend: "bullish" | "bearish" | "ranging";
+  steps: SMCDecisionStep[];
+}
 export interface SMCResponse {
   orderBlocks: SMCOrderBlock[];
   fvgs: SMCFVG[];
@@ -56,6 +79,22 @@ export interface SMCResponse {
   structure: { swings: SMCSwing[]; trend: "bullish" | "bearish" | "ranging" };
   sweeps: SMCSweep[];
   poi: SMCPoi[];
+  // Added with the retest + decision work; optional so an older backend
+  // that doesn't send them yet still renders everything else.
+  retests?: SMCRetest[];
+  decision?: SMCDecision | null;
+}
+
+// One row of a bot's activity log (backend/app/services/botlog.py).
+export interface BotLog {
+  id: number;
+  bot_id: string;
+  pair: string;
+  ts: number; // unix seconds
+  level: "info" | "ok" | "warn" | "error";
+  step: "SCAN" | "STRUCTURE" | "SWEEP" | "ZONES" | "RETEST" | "DECISION" | "GATE" | "ORDER" | "ENTRY" | "EXIT" | "ERROR" | string;
+  message: string;
+  data?: Record<string, unknown> | null;
 }
 
 export interface Signal {

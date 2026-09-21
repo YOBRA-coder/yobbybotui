@@ -38,6 +38,8 @@ import {
   type Logical,
 } from "lightweight-charts";
 import type { OHLCV, Trade, SMCResponse } from "../types";
+import BotActivityPanel from "./BotActivityPanel";
+import SmcDecisionPanel from "./SmcDecisionPanel";
 import { useTheme } from "../context/ThemeContext";
 import { marketApi } from "../api/client";
 
@@ -102,6 +104,10 @@ export interface ProChartProps {
   // above the chart plus per-position ownership labels below it.
   bots?: ChartBot[];
   onBotClick?: (botId: string) => void;
+  // Auth token — when given, the chart shows a live "Bot activity" feed for
+  // the bots running on this pair (what each looked at and why it did or
+  // didn't trade). Omit it (history/signal previews) and the feed is hidden.
+  token?: string | null;
 }
 
 // Deliberately a structural subset of types/index.ts's Bot rather than an
@@ -678,14 +684,14 @@ function logicalToTime(candles: OHLCV[], logical: number): number | null {
 
 type Indicator =
   | "ema20" | "ema50" | "bb" | "volume" | "rsi" | "macd" | "sr" | "ob" | "sd" | "pat"
-  | "fvg" | "structure" | "sweep" | "poi" | "mtf";
+  | "fvg" | "structure" | "sweep" | "poi" | "retest" | "mtf";
 type DrawingTool = "none" | "hline" | "line" | "ray" | "box";
 interface Drawing { id: string; tool: "hline" | "line" | "ray" | "box"; t1: number; p1: number; t2: number; p2: number }
 
 export default function ProChart({
   candles, trades, symbol, timeframe, timeframes = DEFAULT_TIMEFRAMES,
   onTimeframeChange, onTradeClick, onUpdateTpSl, orderBook, signalOverlay, backtestOverlay, height = 520,
-  loading = false, onRequestMoreHistory, bots = [], onBotClick,
+  loading = false, onRequestMoreHistory, bots = [], onBotClick, token,
 }: ProChartProps) {
   const { resolved } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -725,15 +731,19 @@ export default function ProChart({
   // I toggle, save my settings even when reload") — stored once globally
   // rather than per-symbol, since which studies someone likes to see is a
   // chart preference, not something tied to one pair.
-  // Storage key bumped to v2 — v1 payloads have no `sd`/`pat` keys, and the
-  // spread below would leave them undefined rather than falling back to the
-  // defaults, so the two new toggles would render permanently "off" with no
-  // way to tell why for anyone who had ever toggled an indicator before.
-  const INDICATOR_STORAGE_KEY = "chart_indicators_v2";
+  // Storage key bumped to v3. Every SMC overlay (OB, FVG, MS, SWEEP, POI,
+  // S/D, RETEST) and the candle-pattern labels now default to ON — they used
+  // to default to off, so a fresh chart showed no order blocks/FVGs/swings/
+  // sweeps at all, and anyone who had ever visited the page had those
+  // "off" values saved and re-applied on every reload. A new key means
+  // everyone starts from the new defaults; toggles still persist from
+  // there. (v1 -> v2 was for the same kind of reason: an older payload
+  // missing keys leaves them undefined instead of falling back.)
+  const INDICATOR_STORAGE_KEY = "chart_indicators_v3";
   const DEFAULT_INDICATORS: Record<Indicator, boolean> = {
     ema20: true, ema50: true, bb: false, volume: true, rsi: false, macd: false,
-    sr: false, ob: false, sd: false, pat: false,
-    fvg: false, structure: false, sweep: false, poi: false, mtf: false,
+    sr: false, ob: true, sd: true, pat: true,
+    fvg: true, structure: true, sweep: true, poi: true, retest: true, mtf: false,
   };
   const [indicators, setIndicators] = useState<Record<Indicator, boolean>>(() => {
     try {
@@ -831,6 +841,40 @@ export default function ProChart({
   const symbolTradesRef = useRef(symbolTrades);
   useEffect(() => { drawToolRef.current = drawTool; }, [drawTool]);
   useEffect(() => { forceRedrawRef.current = () => forceRedraw(n => n + 1); });
+
+  // Keep the SVG overlay (zones, structure, sweeps, retests, hand drawings)
+  // glued to the candles. The chart only notifies us when the TIME axis
+  // moves (pan / zoom / new bar), but the overlay is also positioned by the
+  // PRICE axis — which changes whenever the auto-scale range shifts (a new
+  // high, dragging the price scale, a resize, toggling an indicator pane).
+  // None of those fire an event we were listening to, so zones would sit at
+  // stale heights, or look missing, until the next pan. This watches the
+  // mapping itself (two reference prices + two reference bars + pane size)
+  // once per animation frame and re-renders ONLY when it actually changed.
+  useEffect(() => {
+    let raf = 0;
+    let last = "";
+    const tick = () => {
+      const chart = chartRef.current, series = candleSeriesRef.current, box = containerRef.current;
+      if (chart && series && box) {
+        const cs = candlesRef.current;
+        const ref = cs.length ? cs[cs.length - 1].close : 1;
+        const ts = chart.timeScale();
+        const sig = [
+          series.priceToCoordinate(ref), series.priceToCoordinate(ref * 1.05),
+          ts.logicalToCoordinate(0 as Logical), ts.logicalToCoordinate(50 as Logical),
+          box.clientWidth, box.clientHeight,
+        ].join("|");
+        if (sig !== last) {
+          last = sig;
+          forceRedrawRef.current();
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
   useEffect(() => { addDrawingRef.current = (d: Drawing) => saveDrawings([...drawings, d]); }, [drawings]);
   useEffect(() => { onUpdateTplRef.current = onUpdateTpSl; }, [onUpdateTpSl]);
   useEffect(() => { onTradeClickRef.current = onTradeClick; }, [onTradeClick]);
@@ -1419,8 +1463,11 @@ export default function ProChart({
   // when the backend request fails (e.g. a brief network hiccup) — this
   // chart still needs to show something useful rather than blanking these
   // overlays out the moment one poll fails.
-  const smcEnabled = indicators.ob || indicators.sd || indicators.fvg || indicators.structure || indicators.sweep || indicators.poi;
+  const smcEnabled = indicators.ob || indicators.sd || indicators.fvg || indicators.structure || indicators.sweep || indicators.poi || indicators.retest;
   const [smcData, setSmcData] = useState<SMCResponse | null>(null);
+  // Re-read the moment a new bar opens (not just on the timer), so zones,
+  // sweeps and retests appear on the bar that made them.
+  const newestBarTime = candles.length ? candles[candles.length - 1].time : 0;
   useEffect(() => {
     if (!smcEnabled) return;
     let cancelled = false;
@@ -1433,9 +1480,9 @@ export default function ProChart({
     // Poll rather than recompute on every candle tick — an order block or
     // FVG's mitigated/filled status only meaningfully changes bar to bar,
     // not tick to tick, so this stays current without hammering the API.
-    const id = setInterval(load, 20000);
+    const id = setInterval(load, 10000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [smcEnabled, symbol, timeframe]);
+  }, [smcEnabled, symbol, timeframe, newestBarTime]);
   // Reset to "no server data yet" whenever the symbol/timeframe changes so
   // the fallback local calc (still correct for the NEW candles) covers the
   // gap instead of briefly showing the previous pair/timeframe's zones.
@@ -1474,6 +1521,37 @@ export default function ProChart({
     () => (indicators.sweep ? (smcData?.sweeps ?? findLiquiditySweeps(candles, marketStructure.swings)) : []),
     [candles, indicators.sweep, marketStructure, smcData]
   );
+
+  // Retests: price coming back into a still-live OB / FVG / S-D zone. Server
+  // only — there's no local fallback, so this is empty until /market/smc
+  // answers (or if the backend predates it).
+  const retests = useMemo(
+    () => (indicators.retest ? (smcData?.retests ?? []) : []),
+    [indicators.retest, smcData]
+  );
+
+  // Several zones can be retested by the very same bar (stacked order
+  // blocks, an OB inside an FVG). One marker per bar+direction, not a pile
+  // of identical pills on top of each other: "RT·OB/FVG ×3".
+  const retestMarkers = useMemo(() => {
+    const g = new Map<string, {
+      time: number; kind: "bullish" | "bearish"; sources: string[]; n: number;
+      confirmed: boolean; active: boolean; top: number; bottom: number;
+    }>();
+    for (const r of retests) {
+      const key = `${r.time}-${r.kind}`;
+      const cur = g.get(key);
+      if (!cur) {
+        g.set(key, { time: r.time, kind: r.kind, sources: [r.source], n: 1, confirmed: r.confirmed, active: r.active, top: r.top, bottom: r.bottom });
+      } else {
+        if (!cur.sources.includes(r.source)) cur.sources.push(r.source);
+        cur.n += 1;
+        cur.confirmed = cur.confirmed || r.confirmed;
+        cur.active = cur.active || r.active;
+      }
+    }
+    return [...g.values()];
+  }, [retests]);
 
   // Points of Interest: the single closest unmitigated/fresh/unfilled zone
   // above price and the single closest one below it, pooled across order
@@ -1624,6 +1702,16 @@ export default function ProChart({
   }, [onRequestMoreHistory]);
 
   const toggle = (k: Indicator) => setIndicators(p => ({ ...p, [k]: !p[k] }));
+  // One switch for the whole Smart Money set (OB, S/D, FVG, MS, SWEEP, POI,
+  // RETEST). On if any is off; off only if all are already on.
+  const SMC_KEYS: Indicator[] = ["ob", "sd", "fvg", "structure", "sweep", "poi", "retest"];
+  const allSmcOn = SMC_KEYS.every(k => indicators[k]);
+  const toggleSmc = () => setIndicators(p => {
+    const turnOn = !SMC_KEYS.every(k => p[k]);
+    const next = { ...p };
+    for (const k of SMC_KEYS) next[k] = turnOn;
+    return next;
+  });
 
   // Converts a stored {time, price} point to pixel coordinates for the SVG
   // drawing overlay. Returns null if the point is off-screen or the chart
@@ -1759,6 +1847,13 @@ export default function ProChart({
             }}>{tf}</button>
         ))}
         <div style={{ width: 1, height: 18, background: "var(--border2)", margin: "0 4px" }} />
+        <button onClick={toggleSmc} title="Smart Money Concepts — turn every overlay (OB, S/D, FVG, MS, SWEEP, POI, RETEST) on or off at once"
+          style={{
+            padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontWeight: 700,
+            background: allSmcOn ? "#00d08422" : "var(--surface)",
+            color: allSmcOn ? "#00d084" : "var(--text-dim)",
+            border: `1px solid ${allSmcOn ? "#00d084" : "var(--border2)"}`,
+          }}>SMC</button>
         {([
           ["ema20", "EMA20", "20-period EMA"],
           ["ema50", "EMA50", "50-period EMA"],
@@ -1774,6 +1869,7 @@ export default function ProChart({
           ["structure", "MS", "Market structure — HH/HL/LH/LL swing labels + trend"],
           ["sweep", "SWEEP", "Liquidity sweeps (stop hunts)"],
           ["poi", "POI", "Points of interest — closest live zones above/below price"],
+          ["retest", "RETEST", "Retests — price coming back into a live order block / FVG / supply-demand zone"],
           ["mtf", "MTF", "Multi-timeframe bias — trend on a higher and a lower timeframe"],
         ] as [Indicator, string, string][]).map(([k, label, title]) => (
           <button key={k} onClick={() => toggle(k)} title={title}
@@ -1851,6 +1947,11 @@ export default function ProChart({
           {fullscreen ? "✕ Close" : "⛶ Expand"}
         </button>
       </div>
+
+      {/* The strategy's own verdict + working for the newest bar — the same
+          evaluate_entry() the Smart Money bot runs, so it's what a bot on
+          this pair would decide right now. */}
+      {smcEnabled && <SmcDecisionPanel decision={smcData?.decision} />}
 
       <div style={{ display: "flex", flex: 1, minHeight: 0, gap: 8 }}>
         <div style={{ position: "relative", flex: 1, minWidth: 0, height: fullscreen ? "auto" : height }}>
@@ -1981,7 +2082,7 @@ export default function ProChart({
                   <rect x={a.x} y={a.y} width={Math.max(0, rightX - a.x)} height={h}
                     fill={`${color}${z.fresh ? "22" : "10"}`} stroke={color}
                     strokeWidth={z.fresh ? 1.4 : 1} strokeDasharray={z.fresh ? undefined : "4 3"} />
-                  <text x={rightX - 4} y={a.y + h / 2 + 3} textAnchor="end"
+                  <text x={rightX - 4} y={a.y + 11} textAnchor="end"
                     fill={color} fontSize={9} fontFamily="monospace" opacity={0.9}>
                     {z.kind === "demand" ? "DEMAND" : "SUPPLY"}{z.fresh ? " • fresh" : ` • ${z.touches}x`}
                   </text>
@@ -2049,6 +2150,21 @@ export default function ProChart({
               );
             })}
 
+            {/* Trend line — the confirmed swing highs/lows joined in order,
+                coloured by the current trend (green = bullish HH/HL,
+                red = bearish LH/LL, grey = ranging). */}
+            {indicators.structure && (() => {
+              const pts = marketStructure.swings
+                .map(sw => projectPoint(sw.time, sw.price))
+                .filter((pt): pt is { x: number; y: number } => !!pt);
+              if (pts.length < 2) return null;
+              return (
+                <polyline points={pts.map(pt => `${pt.x},${pt.y}`).join(" ")} fill="none"
+                  stroke={trendColor(marketStructure.trend)} strokeWidth={1.3} strokeOpacity={0.75}
+                  strokeLinejoin="round" />
+              );
+            })()}
+
             {/* Market structure: swing highs/lows labelled HH / LH / HL / LL */}
             {indicators.structure && marketStructure.swings.map((s, i) => {
               const anchor = projectPoint(s.time, s.price);
@@ -2069,17 +2185,27 @@ export default function ProChart({
               );
             })}
 
-            {/* Liquidity sweeps — a wick through a swing level that closed
-                back on the origin side (stop hunt / rejection). */}
+            {/* Liquidity sweeps — the swing level that was raided (dashed
+                line from the swing that formed it), the wick that poked
+                through it, and a label. Closed back on the origin side =
+                stop hunt / rejection rather than a breakout. */}
             {indicators.sweep && sweeps.map((s, i) => {
-              const anchor = projectPoint(s.time, s.wick);
-              if (!anchor) return null;
+              const wick = projectPoint(s.time, s.wick);
+              const levelY = candleSeriesRef.current?.priceToCoordinate(s.level);
+              if (!wick || levelY == null) return null;
               const color = s.kind === "bullish" ? "#00d084" : "#ff4757";
-              const ty = anchor.y + (s.kind === "bullish" ? 14 : -8);
+              const src = marketStructure.swings.find(w => w.price === s.level && w.kind === (s.kind === "bullish" ? "low" : "high"));
+              const from = src ? projectPoint(src.time, src.price) : null;
+              const x1 = from ? from.x : wick.x - 60;
+              const ty = wick.y + (s.kind === "bullish" ? 16 : -8);
               return (
                 <g key={`sweep_${i}`}>
-                  <line x1={anchor.x - 5} y1={anchor.y} x2={anchor.x + 5} y2={anchor.y} stroke={color} strokeWidth={2} />
-                  <text x={anchor.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
+                  <line x1={x1} y1={levelY} x2={wick.x + 8} y2={levelY} stroke={color} strokeWidth={1} strokeDasharray="4 3" opacity={0.85} />
+                  <line x1={wick.x} y1={levelY} x2={wick.x} y2={wick.y} stroke={color} strokeWidth={2} />
+                  <circle cx={wick.x} cy={wick.y} r={3} fill={color} />
+                  <rect x={wick.x - 19} y={ty - 9} width={38} height={12} rx={2}
+                    fill="rgba(8,14,24,0.82)" stroke={`${color}55`} strokeWidth={1} />
+                  <text x={wick.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
                     SWEEP
                   </text>
                 </g>
@@ -2105,6 +2231,32 @@ export default function ProChart({
                     fill="rgba(8,14,24,0.82)" stroke={`${color}55`} strokeWidth={1} />
                   <text x={anchor.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
                     {p.type.name}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Drawn after the candle-pattern pills so a retest marker is never buried under one. */}
+            {/* Retests — price coming back into a live zone. ✓ = it closed
+                back out of the zone (a rejection, not just a touch); a
+                heavier outline marks the one happening on the newest bar. */}
+            {indicators.retest && retestMarkers.map((r, i) => {
+              const bar = candles.find(c => Math.floor(c.time / 1000) === r.time);
+              const bull = r.kind === "bullish";
+              const anchor = projectPoint(r.time, bar ? (bull ? bar.low : bar.high) : (bull ? r.top : r.bottom));
+              if (!anchor) return null;
+              const dir = bull ? "#00d084" : "#ff4757";
+              const label = `${bull ? "▲" : "▼"} RT·${r.sources.join("/")}${r.n > 1 ? ` ×${r.n}` : ""}${r.confirmed ? " ✓" : ""}${r.active ? " NOW" : ""}`;
+              const w = Math.max(44, label.length * 5.6 + 8);
+              const ty = anchor.y + (bull ? 44 : -38);
+              return (
+                <g key={`retest_${i}`}>
+                  <line x1={anchor.x} y1={anchor.y + (bull ? 3 : -3)} x2={anchor.x} y2={ty + (bull ? -9 : 4)}
+                    stroke="#ffb020" strokeWidth={1} strokeDasharray="2 2" />
+                  <rect x={anchor.x - w / 2} y={ty - 9} width={w} height={13} rx={3}
+                    fill="rgba(8,14,24,0.88)" stroke="#ffb020" strokeWidth={r.active ? 2 : 1} />
+                  <text x={anchor.x} y={ty + 1} textAnchor="middle" fill={dir} fontSize={8} fontFamily="monospace" fontWeight={700}>
+                    {label}
                   </text>
                 </g>
               );
@@ -2232,6 +2384,11 @@ export default function ProChart({
             </div>
           ))}
         </div>
+      )}
+
+      {/* Live log of what each bot on this pair looked at and decided. */}
+      {token && pairBots.length > 0 && (
+        <BotActivityPanel token={token} pair={symbol} bots={pairBots} defaultOpen={fullscreen} height={fullscreen ? 260 : 170} />
       )}
     </div>
   );

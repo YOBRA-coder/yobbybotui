@@ -4,6 +4,7 @@ import type { PageProps } from "./shared";
 import { PAIR_DISPLAY, PAIRS, TIMEFRAMES, TIMEFRAME_LABEL, type Trade } from "../types";
 import { botsApi, accountApi } from "../api/client";
 import { useAuth } from "../context/AuthContext";
+import BotActivityPanel from "../components/BotActivityPanel";
 import { S } from "./styles";
 import { useParams, useNavigate } from "react-router-dom";
 
@@ -318,6 +319,18 @@ export default function BotDetails({
             {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
+      </div>
+
+      <div style={{ height: 11 }} />
+
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 15 }}>
+        <div style={{ color: "var(--text)", fontWeight: 800, fontSize: 14, marginBottom: 4 }}>Bot Activity Log</div>
+        <div style={{ color: "var(--text-dim)", fontSize: 11, marginBottom: 9, lineHeight: 1.5 }}>
+          Every step of each cycle: reading the candles, market structure, liquidity sweeps, order-block / FVG zones,
+          retests, the BUY/HOLD decision, and any gate (cooldown, confidence, capital, open positions) that stopped a trade —
+          then the order, entry and exit. Repeats of an unchanged reading are collapsed.
+        </div>
+        <BotActivityPanel token={auth.token} botId={bot.id} alwaysOpen height={320} />
       </div>
 
       <div style={{ height: 11 }} />

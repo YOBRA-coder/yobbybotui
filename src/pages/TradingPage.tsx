@@ -653,6 +653,8 @@ useEffect(() => {
       // "show which bot is active in charts" — ProChart filters this to the
       // bots configured on the pair currently being viewed.
       bots={bots}
+      // Lets the chart show the live "Bot activity" feed for bots on this pair.
+      token={auth.token}
       onBotClick={(botId) => navigate(`/bot/${botId}`)}
       orderBook={orderBook}
       signalOverlay={signalOverlay}
