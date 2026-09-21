@@ -38,6 +38,26 @@ export interface OHLCV {
   volume: number;
 }
 
+// Smart-money-concepts overlay data — computed server-side by
+// backend/app/services/smc.py, the same functions the Smart Money
+// Concepts bot strategy trades off of. Field names/shapes here mirror
+// the (previously client-side-only) OrderBlock/SDZone/FVG/SwingPoint/
+// Sweep interfaces in ProChart.tsx.
+export interface SMCOrderBlock { top: number; bottom: number; kind: "bullish" | "bearish"; time: number; mitigated: boolean; strength: number }
+export interface SMCZone { top: number; bottom: number; kind: "supply" | "demand"; time: number; touches: number; fresh: boolean }
+export interface SMCFVG { top: number; bottom: number; kind: "bullish" | "bearish"; time: number; filled: boolean; fillPct: number }
+export interface SMCSwing { time: number; price: number; kind: "high" | "low"; label: "HH" | "LH" | "HL" | "LL" | null }
+export interface SMCSweep { time: number; level: number; wick: number; kind: "bullish" | "bearish" }
+export interface SMCPoi { top: number; bottom: number; time: number; kind: "bullish" | "bearish"; source: string }
+export interface SMCResponse {
+  orderBlocks: SMCOrderBlock[];
+  fvgs: SMCFVG[];
+  sdZones: SMCZone[];
+  structure: { swings: SMCSwing[]; trend: "bullish" | "bearish" | "ranging" };
+  sweeps: SMCSweep[];
+  poi: SMCPoi[];
+}
+
 export interface Signal {
   id: string;
   pair: string;

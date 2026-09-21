@@ -1,7 +1,7 @@
 // api/client.ts — Typed API client for NexusAI Python backend
 
 import type {
-  User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult,
+  User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult, SMCResponse,
 } from "../types";
 
 // FIX: this was hardcoded to "https://cryptobotapi.onrender.com" — a stale
@@ -64,6 +64,13 @@ export const marketApi = {
     req<{ bids: { price: number; size: number }[]; asks: { price: number; size: number }[] }>(
       `/market/orderbook/${symbol}?limit=${limit}`
     ),
+  // Order blocks / FVGs / market structure / sweeps / POI — computed
+  // server-side by the exact same functions (app/services/smc.py) the
+  // Smart Money Concepts bot strategy trades off of, so the chart shows
+  // provably the same thing the bot saw rather than a separate client-side
+  // approximation of it.
+  smc: (symbol: string, interval = "1h", limit = 300) =>
+    req<SMCResponse>(`/market/smc/${symbol}?interval=${interval}&limit=${limit}`),
 };
 
 // ── Signals ────────────────────────────────────────────────────────────────────

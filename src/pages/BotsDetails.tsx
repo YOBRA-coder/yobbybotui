@@ -7,7 +7,7 @@ import { useAuth } from "../context/AuthContext";
 import { S } from "./styles";
 import { useParams, useNavigate } from "react-router-dom";
 
-const STRATEGIES = ["RSI Scalper", "EMA Cross", "Grid Trading", "MACD Divergence", "Bollinger Squeeze"];
+const STRATEGIES = ["RSI Scalper", "EMA Cross", "Grid Trading", "MACD Divergence", "Bollinger Squeeze", "Smart Money Concepts"];
 
 // "CONFLUENCE" is an internal marker, not something to show the user
 // as-is — render it as what it actually means instead.

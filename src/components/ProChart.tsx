@@ -32,12 +32,14 @@ import {
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
+  type ISeriesMarkersPluginApi,
   type SeriesMarker,
   type Time,
   type Logical,
 } from "lightweight-charts";
-import type { OHLCV, Trade } from "../types";
+import type { OHLCV, Trade, SMCResponse } from "../types";
 import { useTheme } from "../context/ThemeContext";
+import { marketApi } from "../api/client";
 
 // lightweight-charts draws to a <canvas>, not the DOM — it reads the color
 // strings we hand it directly into the canvas 2D context's fillStyle, which
@@ -119,6 +121,15 @@ export interface ChartBot {
 }
 
 const DEFAULT_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"];
+
+// Multi-timeframe: given the chart's current timeframe, which one counts as
+// "higher" and which as "lower" for the MTF bias strip.
+const TF_LADDER = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];
+function neighborTimeframes(tf: string): { lower: string | null; higher: string | null } {
+  const i = TF_LADDER.indexOf(tf);
+  if (i === -1) return { lower: null, higher: null };
+  return { lower: i > 0 ? TF_LADDER[i - 1] : null, higher: i < TF_LADDER.length - 1 ? TF_LADDER[i + 1] : null };
+}
 
 // Chart timestamps are unix seconds (UTC). Force East Africa Time (UTC+3,
 // no DST) for display regardless of the viewer's own timezone, since the
@@ -476,6 +487,145 @@ function classifyCandle(c: OHLCV, prev?: OHLCV): CandleType {
   return { name: bullish ? "Bullish" : "Bearish", bias: bullish ? "bullish" : "bearish", notable: false };
 }
 
+// ── Fair Value Gaps / imbalance ("gap", "fair value") ───────────────────
+// Classic 3-candle imbalance: candle B (the middle one) moves so decisively
+// that candle A's wick and candle C's wick never overlap, leaving a price
+// range the market never actually traded through. Bullish FVG: C's low is
+// above A's high (gap sits below, often acts as support on a retrace).
+// Bearish FVG: C's high is below A's low (gap sits above, often resistance).
+// A gap is "filled" once price has traded back through the whole zone.
+interface FVG {
+  top: number; bottom: number; kind: "bullish" | "bearish";
+  time: number;      // time of candle C (the confirming candle), seconds
+  filled: boolean;
+  fillPct: number;   // 0-100, how much of the gap has been traded back into
+}
+function findFairValueGaps(candles: OHLCV[], maxGaps = 8): FVG[] {
+  if (candles.length < 5) return [];
+  const gaps: FVG[] = [];
+  for (let i = 2; i < candles.length; i++) {
+    const a = candles[i - 2], c = candles[i];
+    let top = 0, bottom = 0, kind: "bullish" | "bearish" | null = null;
+    if (c.low > a.high) { bottom = a.high; top = c.low; kind = "bullish"; }
+    else if (c.high < a.low) { top = a.low; bottom = c.high; kind = "bearish"; }
+    if (!kind) continue;
+    const size = top - bottom;
+    if (size <= 0) continue;
+
+    let filled = false, deepest = 0; // deepest = how far into the zone price has come back, 0-size
+    for (let j = i + 1; j < candles.length; j++) {
+      const cj = candles[j];
+      if (kind === "bullish") {
+        // Price sits ABOVE a bullish gap when it forms; "filling" means a
+        // later candle's LOW dropping back down into the zone from above.
+        const intrusion = Math.max(0, top - Math.max(bottom, cj.low));
+        deepest = Math.max(deepest, intrusion);
+        if (cj.low <= bottom) { filled = true; deepest = size; break; }
+      } else {
+        // Price sits BELOW a bearish gap when it forms; "filling" means a
+        // later candle's HIGH climbing back up into the zone from below.
+        const intrusion = Math.max(0, Math.min(top, cj.high) - bottom);
+        deepest = Math.max(deepest, intrusion);
+        if (cj.high >= top) { filled = true; deepest = size; break; }
+      }
+    }
+    gaps.push({ top, bottom, kind, time: Math.floor(c.time / 1000), filled, fillPct: Math.min(100, (deepest / size) * 100) });
+  }
+  const lastPrice = candles[candles.length - 1].close;
+  return gaps
+    .sort((x, y) => {
+      if (x.filled !== y.filled) return x.filled ? 1 : -1;
+      const dx = Math.min(Math.abs(x.top - lastPrice), Math.abs(x.bottom - lastPrice));
+      const dy = Math.min(Math.abs(y.top - lastPrice), Math.abs(y.bottom - lastPrice));
+      return dx - dy;
+    })
+    .slice(0, maxGaps)
+    .sort((x, y) => x.time - y.time);
+}
+
+// ── Market structure: swing highs/lows, HH/HL/LH/LL, trend ──────────────
+// Same pivot-detection idea as findSupportResistance, but kept in
+// chronological order (not merged/deduped) so each swing can be compared
+// to the PREVIOUS swing of the same kind to label it Higher High / Lower
+// High / Higher Low / Lower Low — the actual definition of market
+// structure and the basis for "trend" (a run of HH+HL is an uptrend, a run
+// of LH+LL is a downtrend; anything mixed is a range).
+export interface SwingPoint {
+  time: number; price: number; kind: "high" | "low";
+  label: "HH" | "LH" | "HL" | "LL" | null; // null for the first swing of its kind (nothing to compare to yet)
+}
+function findMarketStructure(candles: OHLCV[], lookback = 3): { swings: SwingPoint[]; trend: "bullish" | "bearish" | "ranging" } {
+  if (candles.length < lookback * 2 + 3) return { swings: [], trend: "ranging" };
+  const raw: SwingPoint[] = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const c = candles[i];
+    let isHigh = true, isLow = true;
+    for (let j = i - lookback; j <= i + lookback; j++) {
+      if (j === i) continue;
+      if (candles[j].high >= c.high) isHigh = false;
+      if (candles[j].low <= c.low) isLow = false;
+    }
+    if (isHigh) raw.push({ time: Math.floor(c.time / 1000), price: c.high, kind: "high", label: null });
+    if (isLow) raw.push({ time: Math.floor(c.time / 1000), price: c.low, kind: "low", label: null });
+  }
+  raw.sort((a, b) => a.time - b.time);
+
+  let lastHigh: number | null = null, lastLow: number | null = null;
+  for (const s of raw) {
+    if (s.kind === "high") {
+      s.label = lastHigh == null ? null : (s.price > lastHigh ? "HH" : "LH");
+      lastHigh = s.price;
+    } else {
+      s.label = lastLow == null ? null : (s.price > lastLow ? "HL" : "LL");
+      lastLow = s.price;
+    }
+  }
+
+  // Trend = read off the most recent labelled high and low. HH+HL = clear
+  // uptrend, LH+LL = clear downtrend, anything else (one broke, one didn't
+  // yet) = ranging/transitional — deliberately conservative rather than
+  // guessing a direction off a single swing.
+  const recentHighs = raw.filter(s => s.kind === "high" && s.label).slice(-1)[0];
+  const recentLows = raw.filter(s => s.kind === "low" && s.label).slice(-1)[0];
+  let trend: "bullish" | "bearish" | "ranging" = "ranging";
+  if (recentHighs?.label === "HH" && recentLows?.label === "HL") trend = "bullish";
+  else if (recentHighs?.label === "LH" && recentLows?.label === "LL") trend = "bearish";
+
+  return { swings: raw.slice(-24), trend }; // cap so the overlay doesn't clutter on long history
+}
+
+// ── Liquidity sweeps ("sweeps", stop hunts) ──────────────────────────────
+// A sweep is a wick that pokes through a recent swing high/low (running
+// the stops resting just beyond it) and then closes back on the origin
+// side of that level — the rejection that makes it a sweep rather than a
+// genuine breakout. Bearish sweep = swept a swing HIGH, then closed back
+// below it (liquidity grab before reversing down). Bullish sweep = swept a
+// swing LOW, then closed back above it (grab before reversing up).
+export interface Sweep {
+  time: number; level: number; wick: number; kind: "bullish" | "bearish";
+}
+function findLiquiditySweeps(candles: OHLCV[], swings: SwingPoint[], maxSweeps = 6): Sweep[] {
+  if (!swings.length || candles.length < 5) return [];
+  const sweeps: Sweep[] = [];
+  const highs = swings.filter(s => s.kind === "high");
+  const lows = swings.filter(s => s.kind === "low");
+
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i];
+    const t = Math.floor(c.time / 1000);
+    // Only compare against swings that had already formed before this bar.
+    const priorHigh = [...highs].reverse().find(h => h.time < t && h.price < c.high);
+    if (priorHigh && c.close < priorHigh.price && c.open < priorHigh.price) {
+      sweeps.push({ time: t, level: priorHigh.price, wick: c.high, kind: "bearish" });
+    }
+    const priorLow = [...lows].reverse().find(l => l.time < t && l.price > c.low);
+    if (priorLow && c.close > priorLow.price && c.open > priorLow.price) {
+      sweeps.push({ time: t, level: priorLow.price, wick: c.low, kind: "bullish" });
+    }
+  }
+  return sweeps.slice(-maxSweeps);
+}
+
 // ── time <-> logical index ───────────────────────────────────────────────
 // THE fix for "drawings don't draw" and for order blocks/zones vanishing.
 //
@@ -526,7 +676,9 @@ function logicalToTime(candles: OHLCV[], logical: number): number | null {
   return Math.round(tLo + (tHi - tLo) * frac);
 }
 
-type Indicator = "ema20" | "ema50" | "bb" | "volume" | "rsi" | "macd" | "sr" | "ob" | "sd" | "pat";
+type Indicator =
+  | "ema20" | "ema50" | "bb" | "volume" | "rsi" | "macd" | "sr" | "ob" | "sd" | "pat"
+  | "fvg" | "structure" | "sweep" | "poi" | "mtf";
 type DrawingTool = "none" | "hline" | "line" | "ray" | "box";
 interface Drawing { id: string; tool: "hline" | "line" | "ray" | "box"; t1: number; p1: number; t2: number; p2: number }
 
@@ -546,6 +698,17 @@ export default function ProChart({
   const bbLowerRef = useRef<ISeriesApi<"Line"> | null>(null);
   const rsiRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  // BUG FIX ("arrow duplicates when new candles arrive"): createSeriesMarkers()
+  // attaches a brand-new markers plugin instance to the series every time
+  // it's called — it does NOT replace whatever was attached before. The
+  // trade-marker effect below re-runs on every `candles` change (i.e. every
+  // new live candle / poll tick), so calling createSeriesMarkers() there
+  // each time stacked a fresh, fully-overlapping set of arrows on top of
+  // the old ones on every update — same arrows, drawn again and again.
+  // The fix: create the plugin instance ONCE (lazily, on first run) and
+  // call .setMarkers() on that same instance for every subsequent update,
+  // which replaces its markers instead of layering a new set on top.
+  const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   // Tracks what's already on the chart so the candle-update effect can tell
   // "just the newest bar changed/ticked" apart from "different symbol or
   // timeframe, reload everything" — see that effect for why this matters.
@@ -570,6 +733,7 @@ export default function ProChart({
   const DEFAULT_INDICATORS: Record<Indicator, boolean> = {
     ema20: true, ema50: true, bb: false, volume: true, rsi: false, macd: false,
     sr: false, ob: false, sd: false, pat: false,
+    fvg: false, structure: false, sweep: false, poi: false, mtf: false,
   };
   const [indicators, setIndicators] = useState<Record<Indicator, boolean>>(() => {
     try {
@@ -962,6 +1126,10 @@ export default function ProChart({
       window.removeEventListener("resize", onWindowResize);
       chart.remove();
       chartRef.current = null;
+      // The markers plugin instance dies with the series/chart it was
+      // attached to — drop the ref so a remount creates a fresh one
+      // instead of calling .setMarkers() on a disposed instance.
+      seriesMarkersRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // chart is created once; data updates happen in the effects below
@@ -1139,7 +1307,13 @@ export default function ProChart({
       .filter((m): m is SeriesMarker<Time> => m !== null);
 
     const markers = entryMarkers.sort((a, b) => (a.time as number) - (b.time as number));
-    createSeriesMarkers(series, markers);
+    // See seriesMarkersRef declaration above for why this is setMarkers()
+    // on a reused instance rather than a fresh createSeriesMarkers() call.
+    if (seriesMarkersRef.current) {
+      seriesMarkersRef.current.setMarkers(markers);
+    } else {
+      seriesMarkersRef.current = createSeriesMarkers(series, markers);
+    }
 
     // Rebuild SL/TP price lines for currently open trades on this symbol.
     for (const lines of priceLinesRef.current.values()) {
@@ -1234,19 +1408,126 @@ export default function ProChart({
     };
   }, [candles, indicators.sr]);
 
+  // ── Smart-money-concepts overlay data ────────────────────────────────────
+  // Order blocks, FVGs, structure, sweeps and POI are fetched from
+  // /market/smc, which computes them with the EXACT SAME functions
+  // (backend/app/services/smc.py) the "Smart Money Concepts" bot strategy
+  // trades off of — so what's drawn here is provably what a bot running
+  // that strategy actually saw, not a separate client-side approximation
+  // of it. The local findOrderBlocks/findFairValueGaps/findMarketStructure/
+  // findLiquiditySweeps functions above are kept as a fallback ONLY for
+  // when the backend request fails (e.g. a brief network hiccup) — this
+  // chart still needs to show something useful rather than blanking these
+  // overlays out the moment one poll fails.
+  const smcEnabled = indicators.ob || indicators.sd || indicators.fvg || indicators.structure || indicators.sweep || indicators.poi;
+  const [smcData, setSmcData] = useState<SMCResponse | null>(null);
+  useEffect(() => {
+    if (!smcEnabled) return;
+    let cancelled = false;
+    const load = () => {
+      marketApi.smc(symbol, timeframe, 300).then(data => {
+        if (!cancelled) setSmcData(data);
+      }).catch(() => { /* keep last good data / fall through to local calc below */ });
+    };
+    load();
+    // Poll rather than recompute on every candle tick — an order block or
+    // FVG's mitigated/filled status only meaningfully changes bar to bar,
+    // not tick to tick, so this stays current without hammering the API.
+    const id = setInterval(load, 20000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [smcEnabled, symbol, timeframe]);
+  // Reset to "no server data yet" whenever the symbol/timeframe changes so
+  // the fallback local calc (still correct for the NEW candles) covers the
+  // gap instead of briefly showing the previous pair/timeframe's zones.
+  useEffect(() => { setSmcData(null); }, [symbol, timeframe]);
+
   // Order blocks are drawn as time/price-anchored rectangles in the same
   // SVG overlay used for hand-drawn lines/boxes (below), since
   // lightweight-charts' price lines are horizontal-only and can't express
   // a block's left/right time bounds.
   const orderBlocks = useMemo(
-    () => (indicators.ob ? findOrderBlocks(candles) : []),
-    [candles, indicators.ob]
+    () => (indicators.ob ? (smcData?.orderBlocks ?? findOrderBlocks(candles)) : []),
+    [candles, indicators.ob, smcData]
   );
 
   const sdZones = useMemo(
-    () => (indicators.sd ? findSupplyDemandZones(candles) : []),
-    [candles, indicators.sd]
+    () => (indicators.sd ? (smcData?.sdZones ?? findSupplyDemandZones(candles)) : []),
+    [candles, indicators.sd, smcData]
   );
+
+  const fvgs = useMemo(
+    () => (indicators.fvg || indicators.poi ? (smcData?.fvgs ?? findFairValueGaps(candles)) : []),
+    [candles, indicators.fvg, indicators.poi, smcData]
+  );
+
+  // Structure feeds both the "structure" overlay (HH/HL/LH/LL labels +
+  // trend badge) and the sweep detector (a sweep is defined relative to
+  // swing points), so it's computed whenever either is on.
+  const marketStructure = useMemo(
+    () => (indicators.structure || indicators.sweep
+      ? (smcData?.structure ?? findMarketStructure(candles))
+      : { swings: [], trend: "ranging" as const }),
+    [candles, indicators.structure, indicators.sweep, smcData]
+  );
+
+  const sweeps = useMemo(
+    () => (indicators.sweep ? (smcData?.sweeps ?? findLiquiditySweeps(candles, marketStructure.swings)) : []),
+    [candles, indicators.sweep, marketStructure, smcData]
+  );
+
+  // Points of Interest: the single closest unmitigated/fresh/unfilled zone
+  // above price and the single closest one below it, pooled across order
+  // blocks, supply/demand zones and fair value gaps — "highlight
+  // everything" produces noise; POI is deliberately the opposite: just the
+  // one or two zones actually worth watching right now.
+  interface POI { top: number; bottom: number; time: number; kind: "bullish" | "bearish"; source: string }
+  const pois = useMemo<POI[]>(() => {
+    if (!indicators.poi || candles.length === 0) return [];
+    if (smcData) return smcData.poi;
+    const lastPrice = candles[candles.length - 1].close;
+    const candidates: POI[] = [
+      ...orderBlocks.filter(b => !b.mitigated).map(b => ({ top: b.top, bottom: b.bottom, time: b.time, kind: b.kind, source: "OB" })),
+      ...findSupplyDemandZones(candles).filter(z => z.fresh).map(z => ({
+        top: z.top, bottom: z.bottom, time: z.time, kind: (z.kind === "demand" ? "bullish" : "bearish") as "bullish" | "bearish", source: "S/D",
+      })),
+      ...fvgs.filter(g => !g.filled).map(g => ({ top: g.top, bottom: g.bottom, time: g.time, kind: g.kind, source: "FVG" })),
+    ];
+    const below = candidates.filter(c => c.top <= lastPrice).sort((a, b) => (lastPrice - a.top) - (lastPrice - b.top))[0];
+    const above = candidates.filter(c => c.bottom >= lastPrice).sort((a, b) => (a.bottom - lastPrice) - (b.bottom - lastPrice))[0];
+    return [below, above].filter((p): p is POI => !!p);
+  }, [indicators.poi, candles, orderBlocks, fvgs, smcData]);
+
+  // ── Multi-timeframe bias ("multi timeframe charts higher and lower") ────
+  // Fetches a modest window on the timeframe one step up and one step down
+  // the ladder from whatever's currently displayed, and reads the trend off
+  // each with the same market-structure logic used for the main chart —
+  // so "MTF" shows whether the higher timeframe actually agrees with what
+  // the lower timeframe/entry chart is doing, which is the whole point of
+  // checking multiple timeframes before taking a signal.
+  const [mtfBias, setMtfBias] = useState<{ lower: { tf: string; trend: string } | null; higher: { tf: string; trend: string } | null }>({ lower: null, higher: null });
+  useEffect(() => {
+    if (!indicators.mtf) return;
+    const { lower, higher } = neighborTimeframes(timeframe);
+    let cancelled = false;
+    (async () => {
+      const [lowerCandles, higherCandles] = await Promise.all([
+        lower ? marketApi.klines(symbol, lower, 150).catch(() => null) : Promise.resolve(null),
+        higher ? marketApi.klines(symbol, higher, 150).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (cancelled) return;
+      setMtfBias({
+        lower: lower && lowerCandles ? { tf: lower, trend: findMarketStructure(lowerCandles).trend } : null,
+        higher: higher && higherCandles ? { tf: higher, trend: findMarketStructure(higherCandles).trend } : null,
+      });
+    })();
+    return () => { cancelled = true; };
+    // Re-fetch on symbol/timeframe change or when the toggle turns on; not
+    // on every `candles` tick — MTF bias doesn't need to refresh every
+    // second, just often enough to stay roughly current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indicators.mtf, symbol, timeframe]);
+
+  const trendColor = (t: string) => t === "bullish" ? "#00d084" : t === "bearish" ? "#ff4757" : "var(--text-dim)";
 
   // Pattern labels are only drawn for the most recent stretch of bars —
   // labelling 800 candles would bury the chart under text and cost a
@@ -1489,6 +1770,11 @@ export default function ProChart({
           ["ob", "OB", "Order blocks"],
           ["sd", "S/D", "Supply & demand zones"],
           ["pat", "PAT", "Candlestick pattern labels"],
+          ["fvg", "FVG", "Fair value gaps / imbalance"],
+          ["structure", "MS", "Market structure — HH/HL/LH/LL swing labels + trend"],
+          ["sweep", "SWEEP", "Liquidity sweeps (stop hunts)"],
+          ["poi", "POI", "Points of interest — closest live zones above/below price"],
+          ["mtf", "MTF", "Multi-timeframe bias — trend on a higher and a lower timeframe"],
         ] as [Indicator, string, string][]).map(([k, label, title]) => (
           <button key={k} onClick={() => toggle(k)} title={title}
             style={{
@@ -1527,6 +1813,34 @@ export default function ProChart({
             style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: "transparent", color: "#ff4757", border: "1px solid #ff475744" }}>
             Clear
           </button>
+        )}
+        {indicators.structure && (
+          <span style={{
+            padding: "4px 10px", borderRadius: 6, fontSize: 11, fontFamily: "monospace",
+            color: trendColor(marketStructure.trend), border: `1px solid ${trendColor(marketStructure.trend)}44`,
+          }}>
+            Trend: {marketStructure.trend[0].toUpperCase() + marketStructure.trend.slice(1)}
+          </span>
+        )}
+        {indicators.mtf && (
+          <>
+            {mtfBias.higher && (
+              <span title="Higher timeframe bias" style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 11, fontFamily: "monospace",
+                color: trendColor(mtfBias.higher.trend), border: `1px solid ${trendColor(mtfBias.higher.trend)}44`,
+              }}>
+                {mtfBias.higher.tf} ↑ {mtfBias.higher.trend}
+              </span>
+            )}
+            {mtfBias.lower && (
+              <span title="Lower timeframe bias" style={{
+                padding: "4px 10px", borderRadius: 6, fontSize: 11, fontFamily: "monospace",
+                color: trendColor(mtfBias.lower.trend), border: `1px solid ${trendColor(mtfBias.lower.trend)}44`,
+              }}>
+                {mtfBias.lower.tf} ↓ {mtfBias.lower.trend}
+              </span>
+            )}
+          </>
         )}
         <button onClick={() => setShowBook(s => !s)}
           style={{ marginLeft: fullscreen ? 0 : "auto", padding: "4px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: "transparent", color: "var(--text-dim)", border: "1px solid var(--border2)" }}>
@@ -1689,6 +2003,84 @@ export default function ProChart({
                     fill={`${color}16`} stroke={color} strokeWidth={1} strokeDasharray="3 3" />
                   <text x={a.x + 4} y={a.y - 3} fill={color} fontSize={9} fontFamily="monospace" opacity={0.9}>
                     {b.kind === "bullish" ? "OB+" : "OB−"} {b.strength.toFixed(1)}x{b.mitigated ? " (mitigated)" : ""}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Fair value gaps / imbalance ("gap", "fair value") */}
+            {indicators.fvg && fvgs.map((g, i) => {
+              const a = projectPoint(g.time, g.top);
+              const yBottom = candleSeriesRef.current?.priceToCoordinate(g.bottom);
+              const rightX = projectFutureX(4);
+              if (!a || yBottom == null || rightX == null) return null;
+              const color = g.kind === "bullish" ? "#00d084" : "#ff4757";
+              const h = Math.max(2, yBottom - a.y);
+              return (
+                <g key={`fvg_${i}`} opacity={g.filled ? 0.35 : 0.95}>
+                  <rect x={a.x} y={a.y} width={Math.max(0, rightX - a.x)} height={h}
+                    fill={`${color}12`} stroke={color} strokeWidth={1} strokeDasharray="2 4" />
+                  <text x={a.x + 4} y={a.y - 3} fill={color} fontSize={9} fontFamily="monospace" opacity={0.9}>
+                    FVG{g.filled ? " (filled)" : g.fillPct > 0 ? ` ${g.fillPct.toFixed(0)}%` : ""}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Points of interest — the one or two zones (pooled across OB/
+                S/D/FVG) actually closest to price right now, drawn with a
+                heavier highlight than the base overlays so they stand out
+                as "watch this" rather than just more zones on the pile. */}
+            {indicators.poi && pois.map((p, i) => {
+              const a = projectPoint(p.time, p.top);
+              const yBottom = candleSeriesRef.current?.priceToCoordinate(p.bottom);
+              const rightX = projectFutureX(6);
+              if (!a || yBottom == null || rightX == null) return null;
+              const color = p.kind === "bullish" ? "#00d084" : "#ff4757";
+              const h = Math.max(2, yBottom - a.y);
+              return (
+                <g key={`poi_${i}`}>
+                  <rect x={a.x} y={a.y} width={Math.max(0, rightX - a.x)} height={h}
+                    fill={`${color}22`} stroke={color} strokeWidth={2} />
+                  <text x={a.x + 4} y={a.y - 4} fill={color} fontSize={10} fontFamily="monospace" fontWeight={700}>
+                    ★ POI ({p.source})
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Market structure: swing highs/lows labelled HH / LH / HL / LL */}
+            {indicators.structure && marketStructure.swings.map((s, i) => {
+              const anchor = projectPoint(s.time, s.price);
+              if (!anchor || !s.label) return null;
+              const bullishLabel = s.label === "HH" || s.label === "HL";
+              const color = bullishLabel ? "#00d084" : "#ff4757";
+              const above = s.kind === "high";
+              const ty = anchor.y + (above ? -8 : 16);
+              return (
+                <g key={`struct_${i}`}>
+                  <circle cx={anchor.x} cy={anchor.y} r={2.5} fill={color} />
+                  <rect x={anchor.x - 12} y={ty - 9} width={24} height={12} rx={2}
+                    fill="rgba(8,14,24,0.82)" stroke={`${color}55`} strokeWidth={1} />
+                  <text x={anchor.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
+                    {s.label}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Liquidity sweeps — a wick through a swing level that closed
+                back on the origin side (stop hunt / rejection). */}
+            {indicators.sweep && sweeps.map((s, i) => {
+              const anchor = projectPoint(s.time, s.wick);
+              if (!anchor) return null;
+              const color = s.kind === "bullish" ? "#00d084" : "#ff4757";
+              const ty = anchor.y + (s.kind === "bullish" ? 14 : -8);
+              return (
+                <g key={`sweep_${i}`}>
+                  <line x1={anchor.x - 5} y1={anchor.y} x2={anchor.x + 5} y2={anchor.y} stroke={color} strokeWidth={2} />
+                  <text x={anchor.x} y={ty} textAnchor="middle" fill={color} fontSize={8} fontFamily="monospace" fontWeight={700}>
+                    SWEEP
                   </text>
                 </g>
               );
