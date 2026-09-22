@@ -481,7 +481,8 @@ useEffect(() => {
     display: "flex",
     gap: 10,
     alignItems: "center",
-    cursor: "pointer"
+    cursor: "pointer",
+    color: 'var(--text)'
   },
 
   metrics: {
@@ -699,12 +700,7 @@ useEffect(() => {
 {/* MOBILE PAIRS BUTTON */}
 {isMobile && (
   <>
-    <button
-      style={styles.mobilePairsButton}
-      onClick={() => setShowPairsModal(true)}
-    >
-      Pairs
-    </button>
+   
 
     {showPairsModal && (
       <div
