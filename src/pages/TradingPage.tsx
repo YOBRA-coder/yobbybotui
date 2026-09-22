@@ -346,7 +346,7 @@ useEffect(() => {
   function renderOrderPanel() {
     return (
       <>
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>Order</div>
+        <div style={{ fontWeight: 700, marginBottom: 10, color: "var(--text)" }}>Order</div>
         {ticker && (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 13 }}>
             {[{ l: "BID", v: "$" + fmt(ticker.bid), c: "#00d084" }, { l: "ASK", v: "$" + fmt(ticker.ask), c: "#ff4757" },
