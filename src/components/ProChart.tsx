@@ -754,7 +754,7 @@ export default function ProChart({
   useEffect(() => {
     try { localStorage.setItem(INDICATOR_STORAGE_KEY, JSON.stringify(indicators)); } catch { /* storage full/unavailable, non-fatal */ }
   }, [indicators]);
-  const [showBook, setShowBook] = useState(true);
+  const [showBook, setShowBook] = useState(false);
   // Popup/fullscreen mode: renders the exact same chart (indicators, RSI/
   // MACD panes, drawing tools, open positions) in a full-viewport overlay
   // instead of the cramped inline card — addresses "only when I click open
