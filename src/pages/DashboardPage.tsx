@@ -192,27 +192,7 @@ export default function DashboardPage({ tickers, signals, bots, trades }: PagePr
           </>
         )}
       </div>
-      {isMobile && (
-      <div style={{ display: "flex", gap: 9, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
-        <button style={{ ...S.btnO, width: "auto", padding: "9px 18px" }} onClick={() => navigate('/strategy')} >
-          {"⏳ Strategies"}
-        </button>
-         <button style={{ ...S.btnO, width: "auto", padding: "9px 18px" }} onClick={() => navigate('/history')} >
-          {"⏳ History"}
-        </button>
-         <button style={{ ...S.btnO, width: "auto", padding: "9px 18px" }} onClick={() => navigate('/bots')} >
-          {"⏳ Bots"}
-        </button>
-         <button style={{ ...S.btnO, width: "auto", padding: "9px 18px" }} onClick={() => navigate('/signals')} >
-          {"⏳ Signals"}
-        </button>
-         <button style={{ ...S.btnO, width: "auto", padding: "9px 18px" }} onClick={() => navigate('/settings')} >
-          {"⏳ Settings"}
-        </button>
-
-        </div>
-      )}  
-
+     
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12, marginBottom: 12 }}>
         {/* Live prices */}
         <div style={S.card}>
