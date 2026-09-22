@@ -625,7 +625,7 @@ useEffect(() => {
           onClick={() => setSel(t.symbol)}
           style={styles.pair}
         >
-          <div>{PAIR_DISPLAY[t.symbol]}</div>
+          <div style={{color: 'var(--text)'}}>{PAIR_DISPLAY[t.symbol]}</div>
 
           <div
             style={{
@@ -724,7 +724,7 @@ useEffect(() => {
               }}
               style={styles.pair}
             >
-              <div>{PAIR_DISPLAY[t.symbol]}</div>
+              <div style={{color: 'var(--text)'}}>{PAIR_DISPLAY[t.symbol]}</div>
 
               <div
                 style={{
