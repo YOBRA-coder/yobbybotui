@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { S, authBg } from "./styles";
-import { Navigate, useNavigate } from "react-router";
+import { Navigate, useNavigate } from "react-router-dom";
 
 export default function LoginPage() {
   const { login } = useAuth();

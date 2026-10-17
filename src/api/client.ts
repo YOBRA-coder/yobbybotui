@@ -3,6 +3,9 @@
 import type {
   User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult, SMCResponse, BotLog,
 } from "../types";
+import type {
+  MtfResponse, ScannerRow, MtfSignalRow, MtfSignalStats, MtfBacktest, StoreSeries, MtfMode, SignalPreview, NewsResponse,
+} from "../types/mtf";
 
 // FIX: this was hardcoded to "https://cryptobotapi.onrender.com" — a stale
 // hosted deployment. Every request went there regardless of what backend
@@ -71,6 +74,33 @@ export const marketApi = {
   // approximation of it.
   smc: (symbol: string, interval = "1h", limit = 300) =>
     req<SMCResponse>(`/market/smc/${symbol}?interval=${interval}&limit=${limit}`),
+};
+
+// ── Top-down multi-timeframe SMC (4H bias → 1H setup → entry TF trigger) ─────────
+// All public market data — no token needed. Every call takes an AbortSignal so
+// a fast pair/timeframe switch cancels the request it superseded instead of
+// letting a late answer overwrite the newer one.
+export const mtfApi = {
+  analysis: (symbol: string, o: { mode: MtfMode; entryTf: string; minAgree: number; tfs: string[]; bars?: number }, signal?: AbortSignal) =>
+    req<MtfResponse>(
+      `/market/mtf/${symbol}?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}&tfs=${o.tfs.join(",")}&bars=${o.bars ?? 300}`,
+      { signal },
+    ),
+  overview: (o: { mode: MtfMode; entryTf: string; minAgree: number }, signal?: AbortSignal) =>
+    req<{ rows: ScannerRow[]; updated: number; demo: boolean }>(
+      `/market/overview?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}`, { signal },
+    ),
+  signals: (limit = 60, signal?: AbortSignal) =>
+    req<{ signals: MtfSignalRow[]; stats: MtfSignalStats }>(`/market/mtf-signals?limit=${limit}`, { signal }),
+  backtest: (symbol: string, o: { style: string; entryTf: string; bars: number; minAgree: number; longOnly: boolean }) =>
+    req<MtfBacktest>(
+      `/market/mtf/backtest/${symbol}?style=${o.style}&entry_tf=${o.entryTf}&bars=${o.bars}&min_agree=${o.minAgree}&long_only=${o.longOnly}`,
+    ),
+  preview: (id: number) => req<SignalPreview>(`/market/mtf-signals/${id}/preview`),
+  news: (symbol = "", limit = 30) => req<NewsResponse>(`/market/news?symbol=${symbol}&limit=${limit}`),
+  store: () => req<{ series: StoreSeries[]; total_candles: number; pairs: string[] }>("/market/store"),
+  sync: (symbols: string, tfs = "4h,1h,15m,5m", bars = 1500) =>
+    req<{ synced: Record<string, number> }>(`/market/store/sync?symbols=${symbols}&tfs=${tfs}&bars=${bars}`, { method: "POST" }),
 };
 
 // ── Signals ────────────────────────────────────────────────────────────────────

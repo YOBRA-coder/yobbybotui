@@ -1,25 +1,24 @@
-// App.tsx — NexusAI Trading Platform
-import { Routes,  Route,  Navigate, useNavigate, NavLink} from "react-router-dom";
+// App.tsx — NexusAI: multi-timeframe SMC crypto SIGNALS (no trading, no bots).
+import { Routes, Route, Navigate, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useState, useEffect, useCallback } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
-import { useWebSocket } from "./hooks/useWebSocket";
-import type { Ticker, Bot, Trade, Signal, Strategy, Page, KlineUpdate } from "./types";
-import { PAIR_DISPLAY } from "./types";
-import { marketApi, signalsApi, botsApi, tradesApi, strategiesApi, accountApi } from "./api/client";
+import { MtfProvider, useMtf } from "./context/MtfContext";
+import { useIsMobile } from "./hooks/useIsMobile";
+import { PAIR_DISPLAY, PAIRS } from "./types";
+import { ENTRY_TFS } from "./types/mtf";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import DashboardPage from "./pages/DashboardPage";
-import TradingPage from "./pages/TradingPage";
+import ChartsPage from "./pages/ChartsPage";
+import MarketPage from "./pages/MarketPage";
 import SignalsPage from "./pages/SignalsPage";
-import BotsPage from "./pages/BotsPage";
-import StrategyPage from "./pages/StrategyPage";
-import HistoryPage from "./pages/HistoryPage";
-import SettingsPage from "./pages/SettingsPage";
-import BotDetails from "./pages/BotsDetails";
-import { useLocation } from "react-router-dom";
+import AlertsPage from "./pages/AlertsPage";
+import BacktestPage from "./pages/BacktestPage";
+import ProfilePage from "./pages/ProfilePage";
+import { fmtPrice } from "./components/MtfChart";
+import { BLUE, DOWN, UP, WARN, field } from "./components/ui";
 
-// ── CSS injection ─────────────────────────────────────────────────────────────
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700;800&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -68,7 +67,7 @@ export default function App() {
 
 function AppRouter() {
   const { auth } = useAuth();
-   if (!auth.user) {
+  if (!auth.user) {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
@@ -77,452 +76,120 @@ function AppRouter() {
       </Routes>
     );
   }
-  return <MainShell />;
+  return <Shell />;
 }
 
-// ── Main Shell ────────────────────────────────────────────────────────────────
-function MainShell() {
-  const { auth, logout } = useAuth();
-  const navigate = useNavigate();
- // const [page, setPage] = useState<Page>("dashboard");
-  const [sideOpen, setSideOpen] = useState(window.innerWidth >= 768);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [clock, setClock] = useState(new Date().toLocaleTimeString());
-  const [notif, setNotif] = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
-  const location = useLocation();
-  // State fed from both HTTP init and WebSocket updates
-  const [tickers, setTickers] = useState<Ticker[]>([]);
-  const [Klines, setKlines] = useState<KlineUpdate[]>([]);
-  const [bots, setBots] = useState<Bot[]>([]);
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [signals, setSignals] = useState<Signal[]>([]);
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
-  const [wsStatus, setWsStatus] = useState<"connecting" | "live" | "offline">("connecting");
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
-  // Binance account snapshot for the top bar (equity + live P&L). Polled
-  // rather than pushed: /account/summary hits the exchange, so it's on a
-  // slow-ish interval of its own instead of riding the 5s ticker socket.
-  // A failure here is non-fatal — the pill just shows "offline" and the
-  // rest of the app carries on.
-  const [account, setAccount] = useState<Awaited<ReturnType<typeof accountApi.summary>> | null>(null);
-  // Pulled out of the polling effect so a trade can trigger an IMMEDIATE
-  // refresh instead of waiting up to 30s to see it — see the NEW_TRADE
-  // handler below. "placed a live trade, it's connected and balance
-  // shows, but nothing changes" was this: the order genuinely went to
-  // Binance, but the top-bar equity/P&L pill only repainted on its next
-  // scheduled poll, so a trade placed right after a refresh could sit for
-  // up to 30 seconds looking exactly like nothing had happened.
-  const refreshAccount = useCallback(async () => {
-    if (!auth.token) return;
+type Notif = { msg: string; type: "success" | "error" | "info" };
+
+const ROUTES = ["/", "/charts", "/market", "/signals", "/alerts", "/backtest", "/profile"];
+function Shell() {
+  // reopen on the page you were last on
+  const loc = useLocation();
+  const go = useNavigate();
+  useEffect(() => {
     try {
-      const data = await accountApi.summary(auth.token);
-      setAccount(data);
-    } catch {
-      // Leave the previous snapshot in place rather than blanking the
-      // pill on a single transient failure.
-    }
-  }, [auth.token]);
-  useEffect(() => {
-    if (!auth.token) { setAccount(null); return; }
-    refreshAccount();
-    const id = setInterval(refreshAccount, 30000);
-    return () => clearInterval(id);
+      const last = localStorage.getItem("cs_route");
+      if (loc.pathname === "/" && last && last !== "/" && ROUTES.includes(last)) go(last, { replace: true });
+    } catch { /* storage unavailable */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.token]);
-
-  const notify = useCallback((msg: string, type: "success" | "error" | "info" = "info") => {
+  }, []);
+  useEffect(() => { try { localStorage.setItem("cs_route", loc.pathname); } catch { /* ignore */ } }, [loc.pathname]);
+  const [notif, setNotif] = useState<Notif | null>(null);
+  const notify = useCallback((msg: string, type: Notif["type"] = "info") => {
     setNotif({ msg, type });
-    setTimeout(() => setNotif(null), 3800);
+    setTimeout(() => setNotif(null), 4200);
   }, []);
+  return (
+    <MtfProvider notify={notify}>
+      <Frame notify={notify} notif={notif} />
+    </MtfProvider>
+  );
+}
 
-  
-  // HTTP initial load
-  useEffect(() => {
-    if (!auth.token) return;
-    Promise.all([
-      botsApi.list(auth.token),
-      tradesApi.list(auth.token),
-      signalsApi.list(auth.token),
-      strategiesApi.list(auth.token),
-      marketApi.tickers(),
-    ]).then(([b, t, s, st, tk]) => {
-      setBots(b); setTrades(t); setSignals(s); setStrategies(st); setTickers(tk);
-    }).catch(e => notify("Load error: " + e.message, "error"));
-  }, [auth.token]);
+const NAV: { to: string; label: string; icon: string }[] = [
+  { to: "/", label: "Dashboard", icon: "◫" },
+  { to: "/charts", label: "Charts", icon: "▦" },
+  { to: "/market", label: "Market", icon: "◎" },
+  { to: "/signals", label: "Signals", icon: "◆" },
+  { to: "/alerts", label: "Alerts", icon: "🔔" },
+  { to: "/backtest", label: "Backtest", icon: "↺" },
+  { to: "/profile", label: "Profile", icon: "☺" },
+];
 
-  // Clock
-  useEffect(() => {
-    const id = setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
-    return () => clearInterval(id);
-  }, []);
+function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => void; notif: Notif | null }) {
+  const mobile = useIsMobile(820);
+  const nav = useNavigate();
+  const { symbol, setSymbol, entryTf, setEntryTf, data, loading, error, refresh, auto, setAuto, unread, updated } = useMtf();
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setClock(Date.now()), 1000); return () => clearInterval(t); }, []);
+  const age = updated ? Math.round(clock / 1000 - updated) : null;
+  const status = error ? { t: "Feed problem", c: DOWN } : loading && !data ? { t: "Analysing…", c: WARN } : data?.demo ? { t: "Demo data", c: WARN } : data ? { t: age != null ? `Analysis ${age}s ago` : "Live", c: UP } : { t: "Connecting…", c: WARN };
+  const chg = data?.changePct;
+  const tfBtn = (t: string) => ({ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, padding: "4px 9px", borderRadius: 6, border: `1px solid ${t === entryTf ? BLUE : "var(--border2)"}`, background: t === entryTf ? "#0094ff22" : "transparent", color: t === entryTf ? BLUE : "var(--text-dim)" } as const);
 
-  useEffect(() => {
-    if (isMobile) {
-      setSideOpen(false);
-    } else {
-      setSideOpen(true);
-    }
-  }, [isMobile]);
+  const top = (
+    <header style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: mobile ? "10px 12px" : "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--surface)", position: "sticky", top: 0, zIndex: 20 }}>
+      {mobile && <b style={{ color: UP, letterSpacing: 2, fontSize: 12 }}>NEXUS</b>}
+      <select value={symbol} onChange={e => setSymbol(e.target.value)} style={{ ...field, fontWeight: 800, fontSize: 12 }} aria-label="pair">
+        {PAIRS.map(p => <option key={p} value={p}>{PAIR_DISPLAY[p] || p}</option>)}
+      </select>
+      <div style={{ border: "1px solid var(--border2)", borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 800 }}>
+        {data ? fmtPrice(data.price) : "—"} {chg != null && <span style={{ color: chg >= 0 ? UP : DOWN, fontSize: 10 }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>}
+      </div>
+      <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+        <span style={{ fontSize: 9, color: "var(--text-mute)", letterSpacing: 1.5 }}>ENTRY TF</span>
+        {ENTRY_TFS.map(t => <button key={t} style={tfBtn(t)} onClick={() => setEntryTf(t)}>{t.toUpperCase()}</button>)}
+      </div>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 10, color: status.c, fontWeight: 700 }}><span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 7, background: status.c, marginRight: 5, animation: loading ? "pulse 1s infinite" : undefined }} />{status.t}</span>
+        <button title={auto ? "Auto-refresh on" : "Auto-refresh off"} onClick={() => setAuto(!auto)} style={{ ...field, cursor: "pointer", color: auto ? UP : "var(--text-dim)" }}>{auto ? "AUTO" : "PAUSED"}</button>
+        <button title="Refresh now" aria-label="refresh" onClick={refresh} style={{ ...field, cursor: "pointer" }}>⟳</button>
+        <button title="Alerts" aria-label="alerts" onClick={() => nav("/alerts")} style={{ ...field, cursor: "pointer", position: "relative" }}>
+          🔔{unread > 0 && <span style={{ position: "absolute", top: -6, right: -6, background: DOWN, color: "#fff", borderRadius: 10, fontSize: 9, fontWeight: 800, padding: "1px 5px" }}>{unread > 9 ? "9+" : unread}</span>}
+        </button>
+      </div>
+    </header>
+  );
 
-  useEffect(() => {
-    const onResize = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-
-    window.addEventListener("resize", onResize);
-
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  // WebSocket
-  const { connected } = useWebSocket(auth.token, {
-    onTickers: (t) => { setTickers(t); setWsStatus("live"); },
-    onBotsUpdate: (b) => setBots(b),
-    onNewTrade: (t) => {
-      setTrades(prev => [t, ...prev.slice(0, 499)]);
-      // Any trade — bot-placed, exchange-reconciled, or (via the REST
-      // response path below) manually placed — can move real Binance
-      // equity or this app's own live P&L. Refresh immediately rather
-      // than waiting for the next 30s poll; see refreshAccount above.
-      if (t.live) refreshAccount();
-      // "alert when a bot places a trade every time" — there was no
-      // notification at all here before, bot or manual, entry or exit.
-      // Gated by the Settings > Alerts toggle (defaults on) so it's not
-      // forced on someone running several active bots.
-      if (t.bot_id && localStorage.getItem("bot_trade_alerts") !== "off") {
-        const bot = bots.find(b => b.id === t.bot_id);
-        const label = bot ? bot.name : "Bot";
-        const pairLabel = PAIR_DISPLAY[t.pair] || t.pair;
-        if (t.status === "CLOSED") {
-          const pnl = t.pnl || 0;
-          notify(`🤖 ${label} closed ${pairLabel} — ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, pnl >= 0 ? "success" : "error");
-        } else {
-          notify(`🤖 ${label} placed a ${t.side} on ${pairLabel} @ $${t.price}`, "info");
-        }
-      }
-    },
-    onNewSignals: (s) => setSignals(prev => [...s, ...prev].slice(0, 100)),
-    onBotError: (data) => notify(data.message, "error"),
-    onInit: ({ bots: b, trades: t, signals: s }) => {
-      setBots(b); setTrades(t); setSignals(s); setWsStatus("live");
-    },
+  const linkStyle = (active: boolean): React.CSSProperties => ({
+    display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", textDecoration: "none", fontSize: 12, fontWeight: 700, letterSpacing: 0.5,
+    color: active ? "var(--text)" : "var(--text-dim)", background: active ? "var(--surface2)" : "transparent", borderLeft: `3px solid ${active ? UP : "transparent"}`,
   });
 
-  useEffect(() => {
-    if (!connected) setWsStatus(ws => ws === "live" ? "offline" : "connecting");
-    else setWsStatus("live");
-  }, [connected]);
-
-  useEffect(() => { setMoreOpen(false); }, [location.pathname]);
-
-  const nav: { id: Page; icon: string; label: string }[] = [
-    { id: "dashboard", icon: "◈", label: "Dashboard" },
-    { id: "trading", icon: "◎", label: "Live Trading" },
-    { id: "signals", icon: "◉", label: "Signals" },
-    { id: "bots", icon: "⬡", label: "Bots" },
-    { id: "strategy", icon: "◇", label: "Strategy" },
-    { id: "history", icon: "◫", label: "History" },
-    { id: "settings", icon: "⊕", label: "Settings" },
-  ];
-
-
-  // BUG FIX: Strategy and History were commented out of the mobile bottom
-  // nav, and the full sidebar (which has all 7 items) is hidden entirely
-  // on mobile — so there was literally no way to reach either page on
-  // Android/mobile except typing the URL directly. Rather than cram 7
-  // icons into one bottom bar, the 5th slot is now a "More" sheet holding
-  // everything that doesn't fit, so every page stays reachable.
-  const bottomNav: { id: Page; icon: string; label: string }[] = [
-    { id: "dashboard", icon: "◈", label: "Dashboard" },
-    { id: "trading", icon: "◎", label: "Trading" },
-    { id: "signals", icon: "◉", label: "Signals" },
-    { id: "bots", icon: "⬡", label: "Bots" },
-  ];
-  const moreNav: { id: Page; icon: string; label: string }[] = [
-    { id: "strategy", icon: "◇", label: "Strategy" },
-    { id: "history", icon: "◫", label: "History" },
-    { id: "settings", icon: "⊕", label: "Settings" },
-  ];
-
-
-  const pp = { tickers, signals, setSignals, bots, setBots, trades, setTrades, strategies, setStrategies, notify, refreshAccount };
-
-  const statusColor = wsStatus === "live" ? "#00d084" : wsStatus === "offline" ? "#ff4757" : "#ffd700";
-  const currentPage =
-  nav.find((n) => location.pathname === `/${n.id}`)?.label ||
-  "Dashboard";
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg)" }}>
-      {/* ── Sidebar ── */}
-      {!isMobile && (
-        <aside style={{
-          width: sideOpen ? 220 : 58, flexShrink: 0, background: "var(--bg)", borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", transition: "width .2s ease", overflow: "hidden"
-        }}>
-          <div style={{ padding: "16px 10px", display: "flex", alignItems: "center", gap: 9, cursor: "pointer", borderBottom: "1px solid var(--border)", flexShrink: 0 }} onClick={() => setSideOpen(x => !x)}>
-            <span style={{ color: "#00d084", fontSize: 22, flexShrink: 0 }}>⬡</span>
-            {sideOpen && <span style={{ color: "var(--text)", fontWeight: 900, fontSize: 15, letterSpacing: 3, whiteSpace: "nowrap" }}>NEXUS<span style={{ color: "#00d084" }}>AI</span></span>}
-          </div>
-
-          <nav style={{ flex: 1, padding: "8px 6px", overflowY: "auto" }}>
-            {nav.map(n => (
-              <NavLink
-      key={n.id}
-      to={`/${n.id}`}
-      className="nav-item"
-      style={({ isActive }) => ({
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "8px 9px",
-        borderRadius: 7,
-        cursor: "pointer",
-        marginBottom: 2,
-        transition: "all .15s",
-        textDecoration: "none",
-        color: isActive ? "#00d084" : "var(--text-dim)",
-        background: isActive ? "var(--surface)" : "transparent",
-        borderLeft: `2px solid ${
-          isActive ? "#00d084" : "transparent"
-        }`,
-      })}
-    >
-      <span
-        style={{
-          fontSize: 13,
-          width: 18,
-          textAlign: "center",
-          flexShrink: 0,
-        }}
-      >
-        {n.icon}
-      </span>
-
-      {sideOpen && (
-        <span
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {n.label}
-        </span>
-      )}
-    </NavLink>
-            ))}
-          </nav>
-
-          <div style={{ borderTop: "1px solid var(--border)", padding: "8px 6px", flexShrink: 0 }}>
-            {sideOpen && <div style={{ color: "var(--text-mute)", fontSize: 10, padding: "5px 9px", cursor: "pointer" }} onClick={logout}>⏻ Sign out</div>}
-          </div>
+    <div style={{ display: "flex", minHeight: "100vh", background: "var(--bg)" }}>
+      {!mobile && (
+        <aside style={{ width: 190, background: "var(--surface)", borderRight: "1px solid var(--border)", position: "sticky", top: 0, height: "100vh", flexShrink: 0 }}>
+          <div style={{ padding: "18px 16px", fontWeight: 800, letterSpacing: 3, color: UP, fontSize: 14 }}>NEXUS<span style={{ color: "var(--text)" }}>AI</span><div style={{ fontSize: 8, color: "var(--text-mute)", letterSpacing: 2, marginTop: 3 }}>CRYPTO SIGNALS</div></div>
+          {NAV.map(n => <NavLink key={n.to} to={n.to} end={n.to === "/"} className="nav-item" style={({ isActive }) => linkStyle(isActive)}><span style={{ width: 16, textAlign: "center" }}>{n.icon}</span>{n.label}</NavLink>)}
         </aside>
       )}
-
-      {/* ── Main ── */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
-        {/* Topbar */}
-        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 20px", height: 50, borderBottom: "1px solid var(--border)", background: "var(--bg)", flexShrink: 0 }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 700, letterSpacing: 2 }}>
-          {currentPage.toUpperCase()}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, background: `${statusColor}18`, border: `1px solid ${statusColor}44`, borderRadius: 20, padding: "3px 9px" }}>
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, animation: wsStatus === "live" ? "pulse 2s infinite" : "none" }} />
-              <span style={{ color: statusColor, fontSize: 9, fontWeight: 700, letterSpacing: 2 }}>{wsStatus.toUpperCase()}</span>
-            </div>
-            <span style={{ color: "var(--text-mute)", fontSize: 10, fontFamily: "monospace" }}>{clock}</span>
-            {/* "add binance balance or p and l for binance account first in
-                top bar" — the Binance pill comes BEFORE the demo one so the
-                real-money number is what you read first, and it is styled
-                differently (gold, explicit LIVE/TEST label) so a real
-                balance can never be mistaken for the paper one. Only shown
-                once Binance is actually connected. */}
-            {account?.broker_connected && (
-              <div
-                onClick={() => navigate("settings")}
-                title={
-                  account.live_error
-                    ? `Binance unreachable: ${account.live_error}`
-                    : `Binance ${account.testnet ? "testnet" : "live"} account equity, and the P&L of live trades placed from this app`
-                }
-                style={{
-                  display: "flex", alignItems: "center", gap: 7, cursor: "pointer",
-                  background: account.live_error ? "#ff475712" : "#ffd70012",
-                  border: `1px solid ${account.live_error ? "#ff475744" : "#ffd70044"}`,
-                  borderRadius: 20, padding: "3px 10px",
-                }}>
-                <span style={{ color: account.testnet ? "#0094ff" : "#ffd700", fontSize: 9, fontWeight: 800, letterSpacing: 1 }}>
-                  {account.testnet ? "TEST" : "LIVE"}
-                </span>
-                {account.live_error ? (
-                  <span style={{ color: "#ff4757", fontSize: 10, fontWeight: 700 }}>offline</span>
-                ) : (
-                  <>
-                    <span style={{ color: "var(--text)", fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>
-                      ${(account.live?.total_equity_usdt ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                    </span>
-                    {account.live_pnl && (
-                      <span style={{
-                        color: account.live_pnl.total >= 0 ? "#00d084" : "#ff4757",
-                        fontSize: 10, fontWeight: 700, fontFamily: "monospace",
-                      }}>
-                        {account.live_pnl.total >= 0 ? "+" : ""}{account.live_pnl.total.toFixed(2)}
-                      </span>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-            {typeof auth.user?.balance === "number" && (
-              <div style={{ display: "flex", alignItems: "center", gap: 5, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 20, padding: "3px 10px" }} title="Demo (paper) wallet balance — not real money">
-                <span style={{ color: "var(--text-mute)", fontSize: 9, fontWeight: 700, letterSpacing: 1 }}>DEMO</span>
-                <span style={{ color: "#00d084", fontSize: 11, fontWeight: 700, fontFamily: "monospace" }}>${auth.user.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-              </div>
-            )}
-            <div style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer" }} onClick={() => navigate("settings")} title={auth.user?.email}>
-              <div style={{ width: 26, height: 26, borderRadius: "50%", background: "linear-gradient(135deg,#00d084,#0094ff)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10, color: "#000", flexShrink: 0 }}>
-                {auth.user?.name?.[0]?.toUpperCase()}
-              </div>
-              {!isMobile && <span style={{ color: "var(--text)", fontSize: 11, fontWeight: 600, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{auth.user?.name}</span>}
-            </div>
-          </div>
-        </header>
-
-        {/* Ticker Tape */}
-        {tickers.length > 0 && (
-          <div style={{ background: "var(--bg2)", borderBottom: "1px solid var(--border)", height: 32, overflow: "hidden", display: "flex", alignItems: "center", flexShrink: 0 }}>
-            <div style={{ display: "flex", gap: 24, padding: "0 14px", animation: "ticker 55s linear infinite", whiteSpace: "nowrap" }}>
-              {[...tickers, ...tickers].map((t, i) => (
-                <span key={i} style={{ fontSize: 11, display: "inline-flex", gap: 4, alignItems: "center" }}>
-                  <span style={{ color: "var(--text)", fontWeight: 700 }}>{PAIR_DISPLAY[t.symbol] || t.symbol}</span>
-                  <span style={{ color: "#6080a0" }}>${t.price < 1 ? t.price.toFixed(4) : t.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                  <span style={{ color: t.changePct >= 0 ? "#00d084" : "#ff4757", fontWeight: 600 }}>{t.changePct >= 0 ? "▲" : "▼"}{Math.abs(t.changePct).toFixed(2)}%</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Page content */}
-        <main
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: isMobile ? "18px 14px 90px" : "18px 20px",
-          }}
-        > <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" />} />
-          <Route path="/dashboard" element={<DashboardPage {...pp} />} />
-          <Route path="/trading" element={<TradingPage {...pp}/>} />
-          <Route path="/signals" element={<SignalsPage {...pp}/>} />
-          <Route path="/bots" element={<BotsPage {...pp}/>} />
-          <Route path="/strategy" element={<StrategyPage {...pp}/>} />
-          <Route path="/history" element={<HistoryPage {...pp} />} />
-          <Route path="/settings" element={<SettingsPage {...pp}/>} />
-          <Route path="/bot/:id" element={<BotDetails {...pp} />} />
-          <Route path="/trading/:pair" element={<TradingPage {...pp} />} />
-        </Routes>        </main>
-
-        {/* Mobile Bottom Navigation */}
-        {isMobile && (
-          <nav
-            style={{
-              height: 64,
-              background: "var(--bg)",
-              borderTop: "1px solid var(--border)",
-              display: "flex",
-              justifyContent: "space-around",
-              alignItems: "center",
-              position: "fixed",
-              bottom: 0,
-              left: 0,
-              right: 0,
-              zIndex: 999,
-            }}
-          >
-            {bottomNav.map((n) => (
-                  <NavLink
-      key={n.id}
-      to={`/${n.id}`}
-      style={({ isActive }) => ({
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        color: isActive ? "#00d084" : "var(--text-dim)",
-        fontSize: 11,
-        textDecoration: "none",
-        flex: 1,
-      })}
-    >
-      <span style={{ fontSize: 18 }}>{n.icon}</span>
-      <span>{n.label}</span>
-    </NavLink>
-            ))}
-            <button
-              onClick={() => setMoreOpen(x => !x)}
-              style={{
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                color: moreOpen || moreNav.some(n => location.pathname === `/${n.id}`) ? "#00d084" : "var(--text-dim)",
-                fontSize: 11, background: "none", border: "none", fontFamily: "inherit", flex: 1, cursor: "pointer",
-              }}
-            >
-              <span style={{ fontSize: 18 }}>☰</span>
-              <span>More</span>
-            </button>
-          </nav>
-        )}
-
-        {/* Mobile "More" sheet — Strategy, History, Settings, Sign out.
-            These have no other way to be reached on mobile now that the
-            full sidebar is hidden and the bottom bar only fits 4 primary
-            tabs + this one. */}
-        {isMobile && moreOpen && (
-          <>
-            <div
-              onClick={() => setMoreOpen(false)}
-              style={{ position: "fixed", inset: 0, background: "#00000070", zIndex: 998 }}
-            />
-            <div
-              style={{
-                position: "fixed", left: 0, right: 0, bottom: 64, zIndex: 999,
-                background: "var(--surface2)", borderTop: "1px solid var(--border)",
-                borderRadius: "14px 14px 0 0", padding: "10px 8px 14px",
-                boxShadow: "0 -8px 32px #00000060",
-              }}
-            >
-              {moreNav.map(n => (
-                <NavLink
-                  key={n.id}
-                  to={`/${n.id}`}
-                  style={({ isActive }) => ({
-                    display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
-                    borderRadius: 9, textDecoration: "none",
-                    color: isActive ? "#00d084" : "var(--text)",
-                    background: isActive ? "var(--surface)" : "transparent",
-                    fontSize: 13, fontWeight: 600,
-                  })}
-                >
-                  <span style={{ fontSize: 16, width: 20, textAlign: "center" }}>{n.icon}</span>
-                  {n.label}
-                </NavLink>
-              ))}
-              <div
-                onClick={logout}
-                style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 9, color: "var(--text-dim)", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-              >
-                <span style={{ fontSize: 16, width: 20, textAlign: "center" }}>⏻</span>
-                Sign out
-              </div>
-            </div>
-          </>
-        )}
-
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        {top}
+        <main style={{ padding: mobile ? "12px 12px 80px" : "18px 20px 30px", flex: 1 }}>
+          <Routes>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/charts" element={<ChartsPage />} />
+            <Route path="/market" element={<MarketPage />} />
+            <Route path="/signals" element={<SignalsPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
+            <Route path="/backtest" element={<BacktestPage notify={notify} />} />
+            <Route path="/profile" element={<ProfilePage notify={notify} />} />
+            <Route path="*" element={<Navigate to="/" />} />
+          </Routes>
+        </main>
       </div>
-
-      {/* Notification toast */}
+      {mobile && (
+        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", background: "var(--surface)", borderTop: "1px solid var(--border)", zIndex: 30 }}>
+          {NAV.map(n => (
+            <NavLink key={n.to} to={n.to} end={n.to === "/"} style={({ isActive }) => ({ flex: 1, textAlign: "center", padding: "8px 0 10px", textDecoration: "none", fontSize: 9, fontWeight: 700, color: isActive ? UP : "var(--text-dim)" })}>
+              <div style={{ fontSize: 16 }}>{n.icon}</div>{n.label}
+            </NavLink>
+          ))}
+        </nav>
+      )}
       {notif && (
-        <div style={{ position: "fixed", bottom: 22, right: 22, zIndex: 9999, animation: "fadeUp .3s ease", maxWidth: 360, borderRadius: 10, padding: "11px 18px", color: "#000", fontWeight: 700, fontSize: 12, letterSpacing: 0.5, background: notif.type === "success" ? "#00d084" : notif.type === "error" ? "#ff4757" : "#0094ff", boxShadow: "0 8px 32px #00000060" }}>
+        <div role="status" style={{ position: "fixed", bottom: mobile ? 76 : 22, right: 22, zIndex: 9999, animation: "fadeUp .3s ease", maxWidth: 360, borderRadius: 10, padding: "11px 18px", color: "#000", fontWeight: 700, fontSize: 12, background: notif.type === "success" ? UP : notif.type === "error" ? DOWN : BLUE, boxShadow: "0 8px 32px #00000060" }}>
           {notif.msg}
         </div>
       )}

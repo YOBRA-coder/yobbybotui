@@ -1,189 +1,60 @@
-// pages/SignalsPage.tsx
-import { useState } from "react";
-import type { PageProps } from "./shared";
-import { PAIR_DISPLAY, timeAgo } from "../types";
-import { signalsApi } from "../api/client";
-import { useAuth } from "../context/AuthContext";
-import { S } from "./styles";
-import SignalDetailModal from "../components/SignalDetailModal";
+// pages/SignalsPage.tsx — every signal the scanner has fired, with a preview of how it played out.
+import { useEffect, useState } from "react";
+import { useMtf } from "../context/MtfContext";
+import { PAIR_DISPLAY } from "../types";
+import { fmtPrice } from "../components/MtfChart";
+import { SignalPreviewChart } from "../components/Feeds";
+import { BLUE, DOWN, MUTED, UP, Pill, ago, card, cardHead } from "../components/ui";
 
-export default function SignalsPage({ signals, setSignals, tickers, trades, notify }: PageProps) {
-  const { auth } = useAuth();
-  const [gen, setGen] = useState(false);
-  const [sending, setSending] = useState<string | null>(null);
-    const [sendingCopy, setSendingCopy] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
-  const [detailSignal, setDetailSignal] = useState<typeof signals[0] | null>(null);
+type Filter = "ALL" | "FIRED" | "APPROVED" | "STOPPED" | "EXPIRED";
+const LABEL = { OPEN: "FIRED", WIN: "APPROVED", LOSS: "STOPPED", EXPIRED: "EXPIRED" } as const;
+const COLOR = { OPEN: BLUE, WIN: UP, LOSS: DOWN, EXPIRED: MUTED } as const;
+const KEEP = { FIRED: "OPEN", APPROVED: "WIN", STOPPED: "LOSS", EXPIRED: "EXPIRED" } as const;
 
-  const generate = async () => {
-    if (!auth.token) return;
-    setGen(true);
-    try {
-      const results = await signalsApi.generate(auth.token);
-      setSignals(prev => [...results, ...prev].slice(0, 100));
-      notify(`${results.length} signals generated!`, "success");
-    } catch (e: any) { notify(e.message, "error"); }
-    setGen(false);
-  };
-
-  const sendTG = async (s: typeof signals[0]) => {
-    if (!auth.token) return;
-    setSending(s.id);
-    try {
-      await signalsApi.sendTelegram(auth.token, s.id);
-      notify("Signal sent to Telegram! ✈", "success");
-    } catch (e: any) { notify(e.message || "Telegram failed", "error"); }
-    setSending(null);
-  };
-
-  const copyTrade = async (s: typeof signals[0]) => {
-    if (!auth.token) return;
-    setSendingCopy(s.id);
-    try {
-      await signalsApi.copy(auth.token, s.id );
-      notify("Signal copied to trade! ✈", "success");
-    } catch (e: any) { notify(e.message || "Copy trade failed", "error"); }
-    setSendingCopy(null);
-  };
-
-
-
-  // "calculating p&l auto for each signal indicating how its going if
-  // closed or open" — signals had no P&L or status tracking of any kind
-  // before. If you actually copied a signal into a trade, show that
-  // trade's real (open/unrealized or closed/realized) P&L; otherwise show
-  // a clearly-labeled hypothetical "if you'd taken this" P&L computed off
-  // live price, so you can see how the signal is playing out either way.
-  // `alert: true` means "this is still working and hasn't hit its stop or
-  // target yet, and hasn't been copied" — i.e. worth surfacing as a
-  // still-actionable copy opportunity, not just a quiet history row.
-  const progressFor = (s: typeof signals[0]) => {
-    const tp = s.target_price ?? s.targetPrice ?? s.price;
-    const sl = s.stop_loss ?? s.stopLoss ?? s.price;
-    const linkedTrade = trades.find(t => t.signal_id === s.id);
-    const ticker = tickers.find(t => t.symbol === s.pair);
-    const currentPrice = ticker?.price;
-
-    if (linkedTrade) {
-      const isOpen = linkedTrade.status === "FILLED";
-      let pnl = linkedTrade.pnl || 0;
-      if (isOpen && currentPrice != null) {
-        pnl = linkedTrade.side === "BUY"
-          ? (currentPrice - linkedTrade.price) * linkedTrade.amount
-          : (linkedTrade.price - currentPrice) * linkedTrade.amount;
-      }
-      const pnlPct = linkedTrade.total ? (pnl / linkedTrade.total) * 100 : 0;
-      return {
-        label: isOpen ? "Copied — Open" : "Copied — Closed",
-        pnlText: `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} (${pnl >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)`,
-        color: pnl >= 0 ? "#00d084" : "#ff4757",
-        alert: false,
-      };
-    }
-
-    if (s.type === "HOLD" || currentPrice == null) {
-      return { label: "No position taken", pnlText: "—", color: "var(--text-dim)", alert: false };
-    }
-
-    const pnlPct = s.type === "BUY"
-      ? ((currentPrice - s.price) / s.price) * 100
-      : ((s.price - currentPrice) / s.price) * 100;
-    const hitTarget = s.type === "BUY" ? currentPrice >= tp : currentPrice <= tp;
-    const hitStop = s.type === "BUY" ? currentPrice <= sl : currentPrice >= sl;
-    const stillLive = !hitTarget && !hitStop;
-    const label = hitTarget ? "Would've hit target ✅" : hitStop ? "Would've hit stop 🛑" : "Tracking — not taken";
-    return {
-      label,
-      pnlText: `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% if taken`,
-      color: pnlPct >= 0 ? "#00d084" : "#ff4757",
-      // Still actionable and moving in the right direction — worth an alert.
-      alert: stillLive && pnlPct > 0,
-    };
-  };
-
-  const filtered = filter === "ALL" ? signals : signals.filter(s => s.type === filter);
-
+export default function SignalsPage() {
+  const { signals, stats, markRead } = useMtf();
+  const [f, setF] = useState<Filter>("ALL");
+  const [open, setOpen] = useState<Record<number, boolean>>({});
+  useEffect(() => { markRead(); }, [signals.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  const list = signals.filter(s => f === "ALL" || s.status === KEEP[f]);
+  const count = (k: Filter) => (k === "ALL" ? signals.length : signals.filter(s => s.status === KEEP[k]).length);
+  const stat = (k: string, v: string, c?: string) => <div key={k} style={{ minWidth: 90 }}><div style={{ fontSize: 9, color: "var(--text-mute)", letterSpacing: 1.5 }}>{k}</div><div style={{ fontSize: 18, fontWeight: 800, color: c }}>{v}</div></div>;
+  const tab = (k: Filter) => (
+    <button key={k} onClick={() => setF(k)} style={{ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0.5, padding: "5px 12px", borderRadius: 20, border: `1px solid ${f === k ? BLUE : "var(--border2)"}`, background: f === k ? "#0094ff22" : "transparent", color: f === k ? BLUE : "var(--text-dim)" }}>{k} {count(k)}</button>
+  );
   return (
-    <div style={{ animation: "fadeUp .3s ease" }}>
-      <div style={{ display: "flex", gap: 9, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
-        <button style={{ ...S.btn, width: "auto", padding: "9px 18px" }} onClick={generate} disabled={gen}>
-          {gen ? "⏳ Scanning..." : "⚡ Generate Signals"}
-        </button>
-        {(["ALL", "BUY", "SELL", "HOLD"] as const).map(f => (
-          <div key={f} style={{ background: filter === f ? "#00d08422" : "var(--surface)", border: `1px solid ${filter === f ? "#00d084" : "var(--border)"}`, color: filter === f ? "#00d084" : "var(--text-dim)", borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 11 }} onClick={() => setFilter(f)}>{f}</div>
-        ))}
-        <span style={{ color: "var(--text-mute)", fontSize: 10, marginLeft: "auto" }}>{filtered.length} signals</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ ...card, display: "flex", gap: 22, flexWrap: "wrap", alignItems: "center" }}>
+        {stat("FIRED", String(stats?.total ?? 0))}{stat("LIVE", String(stats?.open ?? 0))}
+        {stat("WIN RATE", stats?.win_rate != null ? `${stats.win_rate}%` : "–")}
+        {stat("NET R", `${(stats?.net_r ?? 0) > 0 ? "+" : ""}${stats?.net_r ?? 0}R`, (stats?.net_r ?? 0) >= 0 ? UP : DOWN)}
       </div>
-
-      {filtered.length === 0 && (
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "70px 0", color: "var(--text-mute)" }}>
-          <div style={{ fontSize: 44 }}>◉</div>
-          <div style={{ color: "var(--text-mute)", marginTop: 10, fontWeight: 600, fontSize: 13 }}>Generate signals to see them here</div>
-        </div>
-      )}
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(310px,1fr))", gap: 11 }}>
-        {filtered.map(s => {
-          const tp = s.target_price ?? s.targetPrice ?? s.price;
-          const sl = s.stop_loss ?? s.stopLoss ?? s.price;
-          const isAI = !!(s.ai_generated || s.aiGenerated);
-          const progress = progressFor(s);
-          const alreadyCopied = trades.some(t => t.signal_id === s.id);
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{(["ALL", "FIRED", "APPROVED", "STOPPED", "EXPIRED"] as Filter[]).map(tab)}</div>
+      <div style={card}>
+        <div style={cardHead}>Signals · fired → approved (target hit) or stopped</div>
+        {list.map((s, i) => {
+          const show = open[s.id] ?? i < 2;
           return (
-            <div key={s.id} style={{ background: "var(--surface)", border: `1px solid ${progress.alert ? "#00d084" : s.type === "BUY" ? "#00d08444" : s.type === "SELL" ? "#ff475744" : "#ffd70044"}`, borderRadius: 11, padding: 15, cursor: "pointer" }} onClick={() => setDetailSignal(s)}>
-              {progress.alert && (
-                <div style={{ display: "flex", alignItems: "center", gap: 5, background: "#00d08420", border: "1px solid #00d08466", color: "#00d084", fontSize: 9, fontWeight: 800, borderRadius: 5, padding: "3px 8px", marginBottom: 8 }}>
-                  🔔 STILL PROFITABLE — COPY NOW
+            <div key={s.id} style={{ padding: "12px 0", borderTop: "1px solid var(--border)" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 800 }}><span style={{ color: s.side === "BUY" ? UP : DOWN }}>{s.side}</span> {PAIR_DISPLAY[s.symbol] || s.symbol} <Pill color="#8aa4c8">{s.style} · {s.entry_tf}</Pill> <Pill color="#8aa4c8">{s.agreement}% · {s.grade}</Pill></div>
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>Entry {fmtPrice(s.entry)} · SL {fmtPrice(s.sl)} · TP {fmtPrice(s.tp)} · {s.rr}R · {s.zone}</div>
+                  {s.reason && <div style={{ fontSize: 10, color: "var(--text-mute)", marginTop: 3 }}>{s.reason}</div>}
                 </div>
-              )}
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span style={{ color: "var(--text)", fontWeight: 800, fontSize: 14 }}>{PAIR_DISPLAY[s.pair] || s.pair}</span>
-                  {isAI && <span style={{ background: "#0094ff18", border: "1px solid #0094ff44", color: "#0094ff", fontSize: 8, padding: "1px 5px", borderRadius: 3, fontWeight: 700 }}>AI</span>}
+                <div style={{ textAlign: "right", fontSize: 11 }}>
+                  <Pill color={COLOR[s.status]}>{LABEL[s.status]}</Pill>
+                  {s.r_result != null && s.status !== "OPEN" && <div style={{ fontWeight: 800, color: s.r_result > 0 ? UP : s.r_result < 0 ? DOWN : MUTED, marginTop: 4 }}>{s.r_result > 0 ? "+" : ""}{s.r_result}R</div>}
+                  <div style={{ color: "var(--text-mute)", fontSize: 10, marginTop: 2 }}>{ago(s.created_at)}</div>
                 </div>
-                <span style={{ background: s.type === "BUY" ? "#00d084" : s.type === "SELL" ? "#ff4757" : "#ffd700", color: "#000", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 4 }}>{s.type}</span>
               </div>
-              <div style={{ color: "var(--text-mute)", fontSize: 9, marginBottom: 8 }}>Posted {timeAgo(s.created_at ?? s.timestamp)}</div>
-              <p style={{ color: "var(--text-dim)", fontSize: 10, marginBottom: 10, lineHeight: 1.55 }}>{s.reason?.slice(0, 90)}</p>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5, marginBottom: 8 }}>
-                {[{ l: "ENTRY", v: "$" + (s.price || 0).toFixed(4), c: "var(--text)" }, { l: "TARGET", v: "$" + (tp || 0).toFixed(4), c: "#00d084" }, { l: "STOP", v: "$" + (sl || 0).toFixed(4), c: "#ff4757" }].map(m => (
-                  <div key={m.l} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 7px" }}>
-                    <div style={{ color: "var(--text-mute)", fontSize: 8, fontWeight: 700, letterSpacing: 1 }}>{m.l}</div>
-                    <div style={{ color: m.c, fontWeight: 700, fontSize: 10, marginTop: 1 }}>{m.v}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 9px", marginBottom: 10 }}>
-                <span style={{ color: "var(--text-dim)", fontSize: 9 }}>{progress.label}</span>
-                <span style={{ color: progress.color, fontWeight: 700, fontSize: 10 }}>{progress.pnlText}</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <div style={{ background: "var(--bg2)", borderRadius: 8, overflow: "hidden", width: 60, height: 4 }}>
-                    <div style={{ width: `${s.confidence}%`, height: "100%", background: s.type === "BUY" ? "#00d084" : s.type === "SELL" ? "#ff4757" : "#ffd700" }} />
-                  </div>
-                  <span style={{ color: "var(--text-dim)", fontSize: 9 }}>{(s.confidence || 0).toFixed(0)}%</span>
-                </div>
-                <button style={{ background: alreadyCopied ? "#2e406018" : "#0094ff18", border: `1px solid ${alreadyCopied ? "var(--text-mute)" : "#0094ff44"}`, color: alreadyCopied ? "var(--text-dim)" : "#0094ff", borderRadius: 6, padding: "4px 11px", cursor: alreadyCopied ? "default" : "pointer", fontSize: 10, fontFamily: "inherit" }} onClick={(e) => { e.stopPropagation(); !alreadyCopied && copyTrade(s); }} disabled={sendingCopy === s.id || alreadyCopied}>
-                  {alreadyCopied ? "✓ Copied" : sendingCopy === s.id ? "..." : "✈ Copy"}
-                </button>
-                <button style={{ background: "#0094ff18", border: "1px solid #0094ff44", color: "#0094ff", borderRadius: 6, padding: "4px 11px", cursor: "pointer", fontSize: 10, fontFamily: "inherit" }} onClick={(e) => { e.stopPropagation(); sendTG(s); }} disabled={sendingCopy === s.id}>
-                  {sending === s.id ? "..." : "✈ Send"}
-                </button>
-              </div>
+              <button onClick={() => setOpen({ ...open, [s.id]: !show })} style={{ cursor: "pointer", fontFamily: "inherit", fontSize: 10, color: BLUE, background: "transparent", border: "none", padding: "6px 0" }}>{show ? "▾ Hide preview" : "▸ Show preview"}</button>
+              {show && <SignalPreviewChart id={s.id} />}
             </div>
           );
         })}
+        {!list.length && <div style={{ color: "var(--text-dim)", fontSize: 12 }}>Nothing here yet. The scanner checks every pair each minute and only fires a signal when every gate passes.</div>}
       </div>
-
-      {detailSignal && (
-        <SignalDetailModal
-          signal={detailSignal}
-          trades={trades}
-          progress={progressFor(detailSignal)}
-          onClose={() => setDetailSignal(null)}
-        />
-      )}
     </div>
   );
 }

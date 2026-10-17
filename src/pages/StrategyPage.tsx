@@ -9,7 +9,7 @@ import { useAuth } from "../context/AuthContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { S } from "./styles";
 
-const PRESETS = ["RSI Scalper", "EMA Cross", "MACD Divergence", "Bollinger Squeeze", "Grid Trading", "Smart Money Concepts"];
+const PRESETS = ["RSI Scalper", "EMA Cross", "MACD Divergence", "Bollinger Squeeze", "Grid Trading", "Smart Money Concepts", "SMC Multi-Timeframe"];
 
 // Plain-language description of each preset's actual entry/exit rule —
 // "list system strategy as execution logic" meant the create form and
@@ -23,6 +23,7 @@ const PRESET_INFO: Record<string, string> = {
   "MACD Divergence": "Buys when the MACD line crosses above its signal line, exits on the cross back below or the stop.",
   "Bollinger Squeeze": "Buys when price closes below the lower Bollinger band, exits at the middle band.",
   "Grid Trading": "Buys when price drops a set % (default 1.5%) below its 20-period average, sells when it recovers the same % above it.",
+  "SMC Multi-Timeframe": "Top-down: 4H structure sets the direction, 1H must agree and price must sit in an order block / FVG / supply-demand zone, then a lower-timeframe confirmation candle (engulfing / rejection / displacement) triggers the entry. Long-only for spot bots; needs a 30m-or-lower timeframe.",
   "Smart Money Concepts": "Buys when price wicks below a recent confirmed swing low and closes back above it (a liquidity sweep/stop hunt) while market structure isn't in a confirmed downtrend, exits at target/stop.",
 };
 

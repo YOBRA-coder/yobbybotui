@@ -267,7 +267,6 @@ export type WSMessage =
   | { type: "PING" | "PONG" }
   | {type: "KLINE"; data: KlineUpdate[]};
 
-export type Page = "dashboard" | "trading" | "signals" | "bots" | "strategy" | "history" | "settings";
 
 export const PAIR_DISPLAY: Record<string, string> = {
   BTCUSDT: "BTC/USDT", ETHUSDT: "ETH/USDT", BNBUSDT: "BNB/USDT",
