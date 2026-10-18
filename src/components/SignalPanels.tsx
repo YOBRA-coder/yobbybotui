@@ -6,6 +6,7 @@ import MtfChart, { fmtPrice } from "./MtfChart";
 import { useMtf } from "../context/MtfContext";
 import { ALL_TFS, LAYERS } from "../types/mtf";
 import { ActivityFeed, NewsList, PlanPreview } from "./Feeds";
+import { OutlookCard } from "./Outlook";
 import { SENS_AGREE, SENS_HINT } from "../types/mtf";
 import type { LayerKey, MtfDecision, MtfPanel, Sens } from "../types/mtf";
 import type { ChartMark } from "./MtfChart";
@@ -69,6 +70,7 @@ function FullViewSide({ panel }: { panel: MtfPanel }) {
       <div style={{ padding: 12 }}>
         {tab === "log" && (
           <>
+            {data && <div style={{ marginBottom: 12 }}><div style={cardHead}>What to expect · and when</div><OutlookCard data={data} withPreview={false} /></div>}
             {dec?.plan && (
               <div style={{ marginBottom: 12 }}>
                 <div style={cardHead}>Trade preview · {dec.plan.side}{dec.type === "HOLD" ? " (setup, not a signal yet)" : ""}</div>
@@ -367,6 +369,7 @@ export function SignalCard({ compact = false }: { compact?: boolean }) {
         </div>
       </div>
       <div style={{ marginTop: 10, fontSize: 11.5, lineHeight: 1.5 }}>{dec.watch}</div>
+      {!compact && data && <OutlookCard data={data} />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, margin: "12px 0" }}>
         {steps.map(([label, ids]) => {
           const st = stepState(dec, ids);

@@ -59,12 +59,18 @@ export interface MtfPlan {
 
 export interface MtfZoneRef { src: string; tf: string; top: number; bottom: number; time: number; fresh: boolean }
 
+export interface Outlook {
+  kind: "trend" | "counter"; side: string; state: SetupState; scenario: string; confirm: string | null;
+  invalid: number | null; target: number | null; from: number | null; to: number | null; window: string;
+  killzone: { name: string; start: number; active: boolean } | null; risk_note: string | null;
+}
+
 export interface MtfDecision {
   style: "intraday" | "scalp"; label: string; bias_tf: string; setup_tf: string; entry_tf: string;
   type: "BUY" | "SELL" | "HOLD"; state: SetupState; direction: Bias; agreement: number; grade: string; gates_ok: boolean;
   checks: MtfCheck[]; plan: MtfPlan | null; zone: MtfZoneRef | null; trigger?: string | null;
   watch: string; reason: string; time?: number;
-  vote_blocked?: boolean; vote_ok?: boolean;
+  vote_blocked?: boolean; vote_ok?: boolean; kind?: "trend" | "counter"; side?: "BUY" | "SELL"; outlook?: Outlook | null;
   expect?: { tf: string; src: string; top: number; bottom: number; distance_pct: number } | null;
   bias_info?: unknown;
 }
@@ -72,7 +78,7 @@ export interface MtfDecision {
 export interface MtfResponse {
   ok: boolean; error?: string; symbol: string; mode: MtfMode; entry_tf: string; min_agree: number;
   demo: boolean; serverTime: number; price: number; changePct?: number | null; staleMinutes: number;
-  decision: MtfDecision; styles: Record<string, MtfDecision>; panels: MtfPanel[]; vote?: VoteResult; sens?: Sens; consensus?: boolean;
+  decision: MtfDecision; counter?: MtfDecision | null; styles: Record<string, MtfDecision>; panels: MtfPanel[]; vote?: VoteResult; sens?: Sens; consensus?: boolean;
   styleInfo: Record<string, { bias_tf: string; setup_tf: string; entry_tfs: string[]; label: string }>;
 }
 
