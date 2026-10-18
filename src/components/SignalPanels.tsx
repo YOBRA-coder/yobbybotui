@@ -5,6 +5,8 @@ import { PAIR_DISPLAY } from "../types";
 import MtfChart, { fmtPrice } from "./MtfChart";
 import { useMtf } from "../context/MtfContext";
 import { ALL_TFS, LAYERS } from "../types/mtf";
+import { useAuth } from "../context/AuthContext";
+import { mtfApi } from "../api/client";
 import { ActivityFeed, NewsList, PlanPreview } from "./Feeds";
 import { OutlookCard } from "./Outlook";
 import { SENS_AGREE, SENS_HINT } from "../types/mtf";
@@ -215,7 +217,14 @@ export function VoteCard({ embedded = false }: { embedded?: boolean }) {
 // ── engine bar: sensitivity, style, and which entry timeframe is ready ───────
 const SENS_LIST: Sens[] = ["strict", "balanced", "fast"];
 export function EngineBar() {
-  const { sens, setSens, minAgree, setMinAgree, mode, setMode, entryTf, setEntryTf, entryScan } = useMtf();
+  const { sens, setSens, minAgree, setMinAgree, mode, setMode, entryTf, setEntryTf, entryScan, engine, refreshEngine, refresh, useProfile, setUseProfile, symbol } = useMtf();
+  const auth = useAuth();
+  const prof = engine?.profiles?.[symbol];
+  const guardVal = engine?.risk_guard == null ? "auto" : String(engine.risk_guard);
+  const setGuard = async (v: string) => {
+    if (!auth.token) return;
+    try { await mtfApi.saveEngine(auth.token, { risk_guard: v === "auto" ? null : +v }); await refreshEngine(); refresh(); } catch { /* keep */ }
+  };
   const seg = (on: boolean, c = BLUE) => ({ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, padding: "3px 10px", border: `1px solid ${on ? c : "var(--border2)"}`, background: on ? `${c}22` : "transparent", color: on ? c : "var(--text-dim)" } as const);
   const best = entryScan?.best;
   const bestRow = entryScan?.rows.find(r => r.tf === best);
@@ -230,6 +239,16 @@ export function EngineBar() {
       <select value={minAgree} onChange={e => setMinAgree(+e.target.value)} style={field} aria-label="minimum agreement" title="Minimum agreement % to fire a signal">
         {Array.from(new Set([50, 55, 60, 65, 70, 75, 80, 85, 90, SENS_AGREE[sens], minAgree])).sort((a, b) => a - b).map(v => <option key={v} value={v}>≥ {v}% agree</option>)}
       </select>
+      <select value={guardVal} onChange={e => setGuard(e.target.value)} style={field} aria-label="entry risk guard" disabled={!auth.token}
+        title="Safe entry: hold a signal back when the entry looks risky (chasing price, oversized candle, little room, exhausted RSI…). Auto = follows the sensitivity preset.">
+        <option value="auto">Safe entry: auto</option><option value="0">Safe entry: off</option><option value="1">Safe entry: block high risk</option><option value="2">Safe entry: block medium+</option>
+      </select>
+      {prof && (
+        <button onClick={() => setUseProfile(!useProfile)} aria-pressed={useProfile} style={{ ...seg(useProfile, "#ffb86b"), borderRadius: 14 }}
+          title={`Tuned for ${symbol} by the backtest optimizer${prof.sens ? ` · ${prof.sens}` : ""}${prof.min_agree ? ` · ≥${prof.min_agree}% agree` : ""}${prof.rr_intraday ? ` · ${prof.rr_intraday}R` : ""}. ${useProfile ? "Click to use the general settings instead." : "Click to use the tuned settings."}`}>
+          🎯 {useProfile ? "tuned" : "tuned off"}
+        </button>
+      )}
       <select value={mode} onChange={e => setMode(e.target.value as "intraday" | "scalp" | "combined")} style={field} aria-label="style">
         <option value="combined">Intraday + scalp</option><option value="intraday">Intraday 4H→1H</option><option value="scalp">Scalp 1H→15M</option>
       </select>
@@ -340,7 +359,8 @@ function stepState(dec: MtfDecision, ids: string[]): "pass" | "fail" | "na" {
   return cs.every(c => c.ok) ? "pass" : "fail";
 }
 export function SignalCard({ compact = false }: { compact?: boolean }) {
-  const { data, loading, minAgree, updated } = useMtf();
+  const { data, loading, minAgree: minAgreeG, updated, useProfile } = useMtf();
+  const minAgree = useProfile && data?.profile?.min_agree ? data.profile.min_agree : minAgreeG;
   const dec = data?.decision;
   if (!dec) return <div style={card}><div style={cardHead}>Signal</div><div style={{ color: "var(--text-dim)", fontSize: 12 }}>{loading ? "Reading the market…" : "No analysis yet."}</div></div>;
   const meta = STATE_META[dec.state];
@@ -369,6 +389,18 @@ export function SignalCard({ compact = false }: { compact?: boolean }) {
         </div>
       </div>
       <div style={{ marginTop: 10, fontSize: 11.5, lineHeight: 1.5 }}>{dec.watch}</div>
+      {dec.entry_risk && (() => {
+        const er = dec.entry_risk, rc = er.level === "LOW" ? UP : er.level === "MEDIUM" ? WARN : DOWN;
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${rc}55`, borderRadius: 8, padding: "6px 9px", fontSize: 11, lineHeight: 1.45 }}>
+            <span style={{ fontWeight: 800, color: rc, fontSize: 10, letterSpacing: 0.6 }}>ENTRY RISK · {er.level}</span>
+            <span style={{ color: "var(--text-mute)", fontSize: 10 }}> (score {er.score})</span>
+            <div style={{ color: "var(--text-dim)" }}>{er.reasons.length ? er.reasons.join(" · ") : "Clean entry: close to the zone, normal candle, room to the next level."}</div>
+            {er.level !== "LOW" && er.limit_entry != null && <div style={{ color: BLUE }}>Safer: wait for a limit fill near {fmtPrice(er.limit_entry)}{er.limit_rr ? ` (${er.limit_rr}R)` : ""}</div>}
+            {data?.profile && useProfile && <div style={{ color: "#ffb86b", fontSize: 10, marginTop: 2 }}>🎯 Using the settings tuned for {data.symbol}</div>}
+          </div>
+        );
+      })()}
       {!compact && data && <OutlookCard data={data} />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, margin: "12px 0" }}>
         {steps.map(([label, ids]) => {

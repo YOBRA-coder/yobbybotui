@@ -68,7 +68,8 @@ export interface MtfChartProps {
 export interface ChartMark { time: number; price: number; side: "BUY" | "SELL"; status: "OPEN" | "WIN" | "LOSS" | "EXPIRED"; r?: number | null }
 
 export type ChartKind = "candles" | "line" | "area";
-const COUNTS = [50, 100, 200, 300, 600, 1000, 1500];
+const COUNTS = [20, 30, 50, 100, 200, 300, 600, 1000, 1500];
+const MINB = 10;                                   // fewest bars you can zoom in to
 
 export default function MtfChart({ panel, layers, plan, planTime, title, subtitle, height = 400, headerRight, side, onNeedMore, marks, news, fullTools, onExpandChange }: MtfChartProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -82,30 +83,52 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
   const [showSide, setShowSide] = useStored<boolean>("cs_side", true);     // full view: show / hide the log-news panel
   const [wheelZoom, setWheelZoom] = useStored<boolean>("cs_wheelzoom", false); // inline: wheel zooms instead of scrolling the page
   const pointers = useRef(new Map<number, { x: number; y: number }>());
-  const pinch = useRef<{ dist: number; count: number } | null>(null);
+  const pinch = useRef<{ dist: number; count: number; vert: boolean; vScale: number } | null>(null);
   const [winW, setWinW] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
   const [offset, setOffset] = useState(0);          // bars scrolled back from the newest
+  // price axis: vScale 1 = auto-fit; <1 zooms in (a narrower price range), >1 zooms out; vShift moves it (in ranges)
+  const [vScale, setVScale] = useState(1);
+  const [vShift, setVShift] = useState(0);
+  const [sheetOpen, setSheetOpen] = useState(false);   // phones: the log/news panel is a bottom sheet, closed by default
+  const [toolsOpen, setToolsOpen] = useState<boolean | null>(null);
+  const [chartH, setChartH] = useState(0);
+  const isMobile = winW < 900;
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
-  const drag = useRef<{ x: number; off: number } | null>(null);
+  const drag = useRef<{ x: number; y: number; off: number; mode: "plot" | "axis"; vScale: number; vShift: number; moved: boolean } | null>(null);
 
   const cs = panel.candles;
   const n = cs.length;
-  const H = expanded ? Math.max(360, winH - 64) : height;
+  const H = expanded ? Math.max(160, chartH || winH - 140) : height;
 
   // width follows the container
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const apply = () => setWidth(Math.max(280, Math.floor(el.clientWidth)));
+    const apply = () => { setWidth(Math.max(240, Math.floor(el.clientWidth))); if (expanded) setChartH(Math.floor(el.clientHeight)); };
     apply();
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(apply);
     ro.observe(el);
     return () => ro.disconnect();
+  }, [expanded, sheetOpen, toolsOpen, showSide, winH, winW]);
+
+  // full view: freeze the page behind it, and let the phone's Back button close it instead of leaving the app
+  useEffect(() => {
+    if (!expanded) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    try { window.history.pushState({ chartFull: true }, ""); } catch { /* ignore */ }
+    const onPop = () => setExpanded(false);
+    window.addEventListener("popstate", onPop);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("popstate", onPop);
+      try { if (window.history.state && window.history.state.chartFull) window.history.back(); } catch { /* ignore */ }
+    };
   }, [expanded]);
 
   useEffect(() => { onExpandChange?.(expanded); }, [expanded]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setOffset(0); }, [panel.tf]);
+  useEffect(() => { setOffset(0); setVScale(1); setVShift(0); }, [panel.tf]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setExpanded(false); };
     const onResize = () => { setWinH(window.innerHeight); setWinW(window.innerWidth); };
@@ -121,6 +144,11 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     const el = svgRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      if (e.altKey) {                                 // Alt + wheel: stretch / squash the price axis
+        e.preventDefault();
+        setVScale(v => Math.min(8, Math.max(0.1, v * (e.deltaY > 0 ? 1.12 : 0.89))));
+        return;
+      }
       const zooming = e.ctrlKey || e.metaKey || expanded || wheelZoom;
       const dx = e.shiftKey ? e.deltaY : Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
       if (dx) {
@@ -137,7 +165,7 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     return () => el.removeEventListener("wheel", onWheel);
   }, [expanded, wheelZoom, width]);
 
-  const vcount = Math.min(Math.max(20, count), Math.max(20, n));
+  const vcount = Math.min(Math.max(MINB, count), Math.max(MINB, n));
   const maxOff = Math.max(0, n - vcount);
   const off = Math.min(offset, maxOff);
   const end = n - off;
@@ -151,7 +179,7 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
   // zoom keeping the candle under the pointer (fx = 0..1 across the plot) where it is
   zoomRef.current = (factor: number, fx: number) => {
     const f = Math.min(1, Math.max(0, fx));
-    const want = Math.round(Math.max(20, vcount * factor));
+    const want = Math.round(Math.max(MINB, vcount * factor));
     if (want > n) { setCount(want); setOffset(0); onNeedMore?.(want); return; }   // ask for more history
     const nc = want;
     if (nc === vcount) return;
@@ -189,9 +217,14 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
       }
     }
     const pad = (hi - lo) * 0.06 || hi * 0.002;
-    return { lo: lo - pad, hi: hi + pad };
+    lo -= pad; hi += pad;
+    if (vScale !== 1 || vShift !== 0) {            // manual price view
+      const sp = hi - lo, mid = (hi + lo) / 2 + vShift * sp, half = (sp / 2) * vScale;
+      return { lo: mid - half, hi: mid + half };
+    }
+    return { lo, hi };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [start, end, n, panel.candles, layers.plan, plan]);
+  }, [start, end, n, panel.candles, layers.plan, plan, vScale, vShift]);
 
   const yp = (p: number) => MT + ((range.hi - p) / (range.hi - range.lo)) * plotH;
   const inView = (top: number, bottom: number) => yp(bottom) >= MT - 40 && yp(top) <= MT + plotH + 40;
@@ -410,10 +443,12 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
-      pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, count: vcount };
+      const vert = Math.abs(a.y - b.y) > Math.abs(a.x - b.x);       // fingers stacked vertically -> price zoom
+      pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, count: vcount, vert, vScale };
       drag.current = null;
     } else {
-      drag.current = { x: e.clientX, off };
+      const r = (e.currentTarget as Element).getBoundingClientRect();
+      drag.current = { x: e.clientX, y: e.clientY, off, mode: e.clientX - r.left > width - MR ? "axis" : "plot", vScale, vShift, moved: false };
     }
   };
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -423,13 +458,24 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     if (pinch.current && pointers.current.size >= 2) {          // two fingers: pinch to zoom
       const [a, b] = [...pointers.current.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-      const want = Math.round(Math.min(Math.max(20, n), Math.max(20, pinch.current.count * (pinch.current.dist / dist))));
+      if (pinch.current.vert) { setVScale(Math.min(8, Math.max(0.1, pinch.current.vScale * (pinch.current.dist / dist)))); return; }
+      const want = Math.round(Math.min(Math.max(MINB, n), Math.max(MINB, pinch.current.count * (pinch.current.dist / dist))));
       if (want !== vcount) zoomRef.current(want / vcount, ((a.x + b.x) / 2 - r.left - ML) / Math.max(1, plotW));
       return;
     }
     if (drag.current) {
-      const d = Math.round((e.clientX - drag.current.x) / barW);
-      setOffset(Math.min(maxOff, Math.max(0, drag.current.off + d)));
+      const dg = drag.current, dy = e.clientY - dg.y;
+      if (dg.mode === "axis") {                                      // drag on the price axis: stretch / squash the price range
+        setVScale(Math.min(8, Math.max(0.1, dg.vScale * Math.exp(dy / 160))));
+      } else {
+        const d = Math.round((e.clientX - dg.x) / barW);
+        setOffset(Math.min(maxOff, Math.max(0, dg.off + d)));
+        // full view (no page behind it): vertical drag also moves the price window, after a small dead zone
+        if (expanded && (dg.moved || Math.abs(dy) > 14)) {
+          dg.moved = true;
+          setVShift(dg.vShift + dy / Math.max(1, plotH) * (vScale || 1));
+        }
+      }
     }
     setHover(x >= ML && x <= xRight && y >= MT && y <= MT + plotH ? { x, y } : null);
   };
@@ -437,9 +483,12 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     if (e) pointers.current.delete(e.pointerId); else pointers.current.clear();
     if (pointers.current.size < 2) pinch.current = null;
     if (pointers.current.size === 0) drag.current = null;
-    else if (pointers.current.size === 1) { const [p0] = [...pointers.current.values()]; drag.current = { x: p0.x, off }; }
+    else if (pointers.current.size === 1) { const [p0] = [...pointers.current.values()]; drag.current = { x: p0.x, y: p0.y, off, mode: "plot", vScale, vShift, moved: false }; }
   };
-  const reset = () => { setCount(110); setOffset(0); };
+  const reset = () => { setCount(110); setOffset(0); setVScale(1); setVShift(0); };
+  const fitPrice = () => { setVScale(1); setVShift(0); };
+  const priceZoom = (f: number) => setVScale(v => Math.min(8, Math.max(0.1, v * f)));
+  const manualPrice = vScale !== 1 || vShift !== 0;
   const pickCount = (v: number) => { setCount(v); setOffset(0); if (v > n) onNeedMore?.(v); };
   const kindBtn = (k: ChartKind, label: string, tip: string) => (
     <button key={k} style={{ ...btn, color: kind === k ? "var(--text)" : "var(--text-dim)", borderColor: kind === k ? "#0094ff" : "var(--border2)", background: kind === k ? "#0094ff22" : "transparent" }} title={tip} aria-pressed={kind === k} onClick={() => setKind(k)}>{label}</button>
@@ -450,8 +499,10 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
     padding: "2px 8px", fontSize: 11, cursor: "pointer", fontFamily: "inherit", lineHeight: 1.4,
   };
 
+  const sideOn = isMobile ? sheetOpen : showSide;
+  const toolsOpenNow = toolsOpen ?? !isMobile;
   const body = (
-    <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", ...(expanded ? { position: "fixed", inset: 0, zIndex: 2000, borderRadius: 0, background: "var(--bg)", overflowY: "auto" } : {}) }}>
+    <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", ...(expanded ? { position: "fixed", top: 0, left: 0, width: "100%", height: winH, zIndex: 2000, borderRadius: 0, background: "var(--bg)", display: "flex", flexDirection: "column" } : {}) }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
         <span style={{ fontWeight: 800, fontSize: 12, letterSpacing: 1, color: "var(--text)" }}>{title ?? tfTag}</span>
         {subtitle && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{subtitle}</span>}
@@ -462,16 +513,20 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
             {(COUNTS.includes(vcount) ? COUNTS : [...COUNTS, vcount].sort((a, b) => a - b)).map(c => <option key={c} value={c}>{c} bars</option>)}
           </select>
           {!expanded && <button style={{ ...btn, color: wheelZoom ? "var(--text)" : "var(--text-dim)", borderColor: wheelZoom ? "#0094ff" : "var(--border2)" }} title={wheelZoom ? "Mouse wheel zooms the chart (click: wheel scrolls the page again)" : "Mouse wheel scrolls the page (click: wheel zooms the chart). Ctrl+wheel always zooms."} aria-pressed={wheelZoom} onClick={() => setWheelZoom(!wheelZoom)}>🖱 {wheelZoom ? "zoom" : "scroll"}</button>}
-          {expanded && side && <button style={{ ...btn, color: showSide ? "var(--text)" : "var(--text-dim)", borderColor: showSide ? "#0094ff" : "var(--border2)" }} title={showSide ? "Hide the log / news panel (chart only)" : "Show the log / news panel"} aria-pressed={showSide} onClick={() => setShowSide(!showSide)}>◧ {showSide ? "Hide panel" : "Panel"}</button>}
-          <button style={btn} title="Zoom out" onClick={() => zoomRef.current(1.25, 0.5)}>−</button>
-          <button style={btn} title="Zoom in" onClick={() => zoomRef.current(0.8, 0.5)}>+</button>
+          {expanded && fullTools && <button style={{ ...btn, color: toolsOpenNow ? "var(--text)" : "var(--text-dim)", borderColor: toolsOpenNow ? "#0094ff" : "var(--border2)" }} title="Timeframe and concept toggles" aria-pressed={toolsOpenNow} onClick={() => setToolsOpen(!toolsOpenNow)}>⚙ Tools</button>}
+          {expanded && side && <button style={{ ...btn, color: sideOn ? "var(--text)" : "var(--text-dim)", borderColor: sideOn ? "#0094ff" : "var(--border2)" }} title={sideOn ? "Hide the log / news panel (chart only)" : "Show the log / news panel"} aria-pressed={sideOn} onClick={() => (isMobile ? setSheetOpen(!sheetOpen) : setShowSide(!showSide))}>◧ {sideOn ? "Hide panel" : "Panel"}</button>}
+          <button style={btn} title="Zoom out (more time)" onClick={() => zoomRef.current(1.25, 0.5)}>−</button>
+          <button style={btn} title="Zoom in (less time)" onClick={() => zoomRef.current(0.8, 0.5)}>+</button>
+          <button style={btn} title="Narrower price range (zoom the price axis in)" aria-label="price zoom in" onClick={() => priceZoom(0.8)}>↕+</button>
+          <button style={btn} title="Wider price range (zoom the price axis out)" aria-label="price zoom out" onClick={() => priceZoom(1.25)}>↕−</button>
+          <button style={{ ...btn, color: manualPrice ? "#0094ff" : "var(--text-dim)", borderColor: manualPrice ? "#0094ff" : "var(--border2)" }} title="Auto-fit the price range to the candles" aria-pressed={!manualPrice} onClick={fitPrice}>Fit</button>
           <button style={btn} title="Reset zoom, jump to latest" onClick={reset}>⟲</button>
           <button style={btn} title={expanded ? "Close (Esc)" : "Expand"} onClick={() => setExpanded(x => !x)}>{expanded ? "✕" : "⤢"}</button>
         </span>
       </div>
-      {expanded && fullTools && <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 6 }}>{fullTools}</div>}
-      <div style={{ display: "flex", flexWrap: expanded && side && showSide && winW < 900 ? "wrap" : "nowrap" }}>
-      <div ref={wrapRef} style={{ flex: 1, minWidth: 0, width: "100%", position: "relative" }}>
+      {expanded && fullTools && toolsOpenNow && <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 6, maxHeight: isMobile ? "34%" : undefined, overflowY: "auto", flexShrink: 0 }}>{fullTools}</div>}
+      <div style={expanded ? { display: "flex", flex: 1, minHeight: 0, flexDirection: isMobile ? "column" : "row" } : { display: "flex" }}>
+      <div ref={wrapRef} style={expanded ? { flex: "1 1 0", minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden" } : { flex: 1, minWidth: 0, width: "100%", position: "relative" }}>
         <svg ref={svgRef} width={width} height={H} role="img" aria-label={`${tfTag} chart`}
           style={{ display: "block", touchAction: expanded ? "none" : "pan-y", cursor: drag.current ? "grabbing" : "crosshair", userSelect: "none" }}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onPointerLeave={e => { if (e.pointerType === "mouse") { onUp(e); setHover(null); } }}
@@ -566,8 +621,10 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
           {n === 0 && <text x={width / 2} y={H / 2} textAnchor="middle" fill="var(--text-dim)" fontSize={12}>No candles yet</text>}
         </svg>
       </div>
-      {expanded && side && showSide && (
-        <aside style={{ flex: winW < 900 ? "1 1 100%" : "0 0 360px", width: winW < 900 ? "100%" : 360, borderLeft: winW < 900 ? "none" : "1px solid var(--border)", borderTop: winW < 900 ? "1px solid var(--border)" : "none", maxHeight: winW < 900 ? undefined : H, overflowY: "auto" }}>{side}</aside>
+      {expanded && side && sideOn && (
+        <aside aria-label="log and news panel" style={isMobile
+          ? { flex: "0 0 44%", minHeight: 0, borderTop: "1px solid var(--border)", overflowY: "auto", background: "var(--surface2)" }
+          : { flex: "0 0 360px", width: 360, borderLeft: "1px solid var(--border)", overflowY: "auto", minHeight: 0 }}>{side}</aside>
       )}
       </div>
     </div>

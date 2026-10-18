@@ -53,7 +53,7 @@ export interface MtfCheck {
 }
 
 export interface MtfPlan {
-  side: "BUY" | "SELL"; entry: number; sl: number; tp: number; rr: number; risk_pct: number; ideal_entry: number;
+  side: "BUY" | "SELL"; entry: number; sl: number; tp: number; rr: number; risk_pct: number; ideal_entry: number; limit_rr?: number | null;
   target_liquidity: { price: number; label: string; rr: number | null } | null;
 }
 
@@ -70,7 +70,7 @@ export interface MtfDecision {
   type: "BUY" | "SELL" | "HOLD"; state: SetupState; direction: Bias; agreement: number; grade: string; gates_ok: boolean;
   checks: MtfCheck[]; plan: MtfPlan | null; zone: MtfZoneRef | null; trigger?: string | null;
   watch: string; reason: string; time?: number;
-  vote_blocked?: boolean; vote_ok?: boolean; kind?: "trend" | "counter"; side?: "BUY" | "SELL"; outlook?: Outlook | null;
+  vote_blocked?: boolean; vote_ok?: boolean; entry_risk?: EntryRisk | null; kind?: "trend" | "counter"; side?: "BUY" | "SELL"; outlook?: Outlook | null;
   expect?: { tf: string; src: string; top: number; bottom: number; distance_pct: number } | null;
   bias_info?: unknown;
 }
@@ -78,14 +78,14 @@ export interface MtfDecision {
 export interface MtfResponse {
   ok: boolean; error?: string; symbol: string; mode: MtfMode; entry_tf: string; min_agree: number;
   demo: boolean; serverTime: number; price: number; changePct?: number | null; staleMinutes: number;
-  decision: MtfDecision; counter?: MtfDecision | null; styles: Record<string, MtfDecision>; panels: MtfPanel[]; vote?: VoteResult; sens?: Sens; consensus?: boolean;
+  decision: MtfDecision; counter?: MtfDecision | null; profile?: EngineProfile | null; styles: Record<string, MtfDecision>; panels: MtfPanel[]; vote?: VoteResult; sens?: Sens; consensus?: boolean;
   styleInfo: Record<string, { bias_tf: string; setup_tf: string; entry_tfs: string[]; label: string }>;
 }
 
 export interface ScannerRow {
   symbol: string; price: number | null; changePct: number | null; type: "BUY" | "SELL" | "HOLD"; state: SetupState;
   direction: Bias; style: string; agreement: number; grade: string; watch: string; entry_tf: string; bias_tf: string; setup_tf: string;
-  zone: string | null; plan: MtfPlan | null; styles: Record<string, { state: SetupState; agreement: number; direction: Bias; grade: string; type: string; entry_tf: string }>;
+  tuned?: boolean; zone: string | null; plan: MtfPlan | null; styles: Record<string, { state: SetupState; agreement: number; direction: Bias; grade: string; type: string; entry_tf: string }>;
 }
 
 export interface MtfSignalRow {
@@ -139,9 +139,25 @@ export interface VoteResult {
   weighting: "equal" | "best"; horizon: number; note: string;
 }
 export interface EntryScan { symbol: string; best: string | null; rows: { tf: string; state: SetupState; type: string; direction: Bias; agreement: number; grade: string; style: string; watch: string }[] }
+export interface EngineProfile {
+  sens?: Sens; min_agree?: number; entry_tf?: string; mode?: MtfMode; rr_intraday?: number; rr_scalp?: number; sl_buffer?: number;
+  risk_guard?: number; max_chase_atr?: number; min_room_rr?: number; max_risk_pct?: number; gate_sweep?: boolean; gate_killzone?: boolean;
+  rsi_guard?: boolean; vol_guard?: boolean; avoid_weekend?: boolean; tuned_at?: number; score?: number;
+}
 export interface EngineConfig {
   mode: MtfMode; entry_tf: string; min_agree: number; sens: Sens; consensus: boolean; weighting: "equal" | "best";
   rr_intraday: number | null; rr_scalp: number | null; sl_buffer: number | null; gate_sweep: boolean | null; gate_killzone: boolean | null;
+  risk_guard: number | null; max_chase_atr: number | null; min_room_rr: number | null; max_risk_pct: number | null;
+  rsi_guard: boolean | null; vol_guard: boolean | null; avoid_weekend: boolean | null;
+  profiles: Record<string, EngineProfile>;
+}
+export interface EntryRisk { level: "LOW" | "MEDIUM" | "HIGH"; score: number; reasons: string[]; limit_entry?: number; limit_rr?: number | null }
+export interface OptMetrics { trades: number; win_rate: number; avg_r: number; net_r: number; profit_factor: number | null; max_drawdown_r: number }
+export interface OptCandidate { params: Record<string, string | number | boolean>; train: OptMetrics; val: OptMetrics; score: number }
+export interface OptResult {
+  symbol: string; style: string; entry_tf: string; bars: number; runs: number; verdict: "robust" | "tentative" | "none"; note: string;
+  split_time: number; from: number; to: number; best: OptCandidate | null; profile: EngineProfile | null;
+  baseline: { params: Record<string, string | number | boolean>; train: OptMetrics; val: OptMetrics }; candidates: OptCandidate[]; demo: boolean;
 }
 export interface BtStats {
   expectancy_r: number; avg_win_r: number; avg_loss_r: number; best_r: number; worst_r: number; max_win_streak: number; max_loss_streak: number;

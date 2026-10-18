@@ -4,9 +4,10 @@
 // desktop notification) when a NEW signal fires — on whichever page you are looking at.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import { mtfApi } from "../api/client";
+import { pwa } from "../pwa";
 import { useAuth } from "./AuthContext";
 import { SENS_AGREE } from "../types/mtf";
-import type { EntryScan, LayerKey, MtfMode, MtfResponse, MtfSignalRow, MtfSignalStats, NewsItem, ScannerRow, Sens } from "../types/mtf";
+import type { EngineConfig, EngineProfile, EntryScan, LayerKey, MtfMode, MtfResponse, MtfSignalRow, MtfSignalStats, NewsItem, ScannerRow, Sens } from "../types/mtf";
 
 export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   ob: true, fvg: true, sd: true, poi: true, bos: true, choch: true, swings: true, eq: true, sweep: true, retest: true, trend: true, pd: false, plan: true, volume: false, signals: true, news: true,
@@ -54,6 +55,8 @@ interface Ctx {
   prefs: Prefs; setPrefs: (p: Prefs) => void;
   auto: boolean; setAuto: (b: boolean) => void;
   history: number; setHistory: (n: number) => void;
+  engine: EngineConfig | null; refreshEngine: () => Promise<void>;
+  useProfile: boolean; setUseProfile: (b: boolean) => void; profile: EngineProfile | null;
   sens: Sens; setSens: (s: Sens) => void; consensus: boolean; setConsensus: (b: boolean) => void;
   weighting: "equal" | "best"; setWeighting: (w: "equal" | "best") => void;
   entryScan: EntryScan | null; setExtra: (id: string, tf: string | null) => void; news: NewsItem[];
@@ -81,6 +84,10 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
   const [history, setHistory] = useStored<number>("cs_bars", 300);
   const [sens, setSensRaw] = useStored<Sens>("cs_sens", "balanced");
   const [consensus, setConsensus] = useStored<boolean>("cs_consensus", false);
+  const [useProfile, setUseProfile] = useStored<boolean>("cs_useprofile", true);   // use the optimizer's tuned settings for a pair, when it has them
+  const [engine, setEngine] = useState<EngineConfig | null>(null);
+  const refreshEngine = useCallback(async () => { try { setEngine((await mtfApi.engine()).config); } catch { /* keep last */ } }, []);
+  useEffect(() => { refreshEngine(); }, [refreshEngine]);
   const [weighting, setWeighting] = useStored<"equal" | "best">("cs_weight", "equal");
   const [extra, setExtraState] = useState<Record<string, string>>({});
   const [entryScan, setEntryScan] = useState<EntryScan | null>(null);
@@ -132,7 +139,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     abort.current = ac;
     if (spinner) setLoading(true);
     try {
-      const r = await mtfApi.analysis(symbol, { mode, entryTf, minAgree, tfs: tfKey.split(","), bars: history, sens, consensus, weighting }, ac.signal);
+      const r = await mtfApi.analysis(symbol, { mode, entryTf, minAgree, tfs: tfKey.split(","), bars: history, sens, consensus, weighting, profile: useProfile }, ac.signal);
       if (id !== reqId.current) return;
       if (!r.ok) { setError(r.error || "No data"); setData(null); }
       else { setData(r); setError(null); setUpdated(Date.now() / 1000); }
@@ -142,7 +149,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     } finally {
       if (id === reqId.current) setLoading(false);
     }
-  }, [symbol, mode, entryTf, minAgree, tfKey, history, sens, consensus, weighting]);
+  }, [symbol, mode, entryTf, minAgree, tfKey, history, sens, consensus, weighting, useProfile]);
 
   useEffect(() => {
     load(true);
@@ -158,7 +165,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     prevStates.current = null;
     const run = async () => {
       try {
-        const o = await mtfApi.overview({ mode, entryTf, minAgree, sens, consensus, weighting });
+        const o = await mtfApi.overview({ mode, entryTf, minAgree, sens, consensus, weighting, profile: useProfile });
         if (!live) return;
         setRows(o.rows);
         const prev = prevStates.current;
@@ -177,20 +184,20 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     run();
     const t = setInterval(run, 30000);
     return () => { live = false; clearInterval(t); };
-  }, [mode, entryTf, minAgree, sens, consensus, weighting, pushEvents]);
+  }, [mode, entryTf, minAgree, sens, consensus, weighting, useProfile, pushEvents]);
 
   // which entry timeframe is ready right now (drives the dots on the top-bar buttons)
   useEffect(() => {
     let live = true;
     const ac = new AbortController();
     const run = async () => {
-      try { const r = await mtfApi.entryScan(symbol, { mode, minAgree, sens, consensus, weighting }, ac.signal); if (live) setEntryScan(r); } catch { /* keep last */ }
+      try { const r = await mtfApi.entryScan(symbol, { mode, minAgree, sens, consensus, weighting, profile: useProfile }, ac.signal); if (live) setEntryScan(r); } catch { /* keep last */ }
     };
     setEntryScan(null);
     run();
     const t = setInterval(run, 30000);
     return () => { live = false; ac.abort(); clearInterval(t); };
-  }, [symbol, mode, minAgree, sens, consensus, weighting]);
+  }, [symbol, mode, minAgree, sens, consensus, weighting, useProfile]);
 
   // headlines for the chart's news markers (this coin)
   useEffect(() => {
@@ -241,7 +248,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
             if (p.toast) notify(msg, isNew ? "info" : x.status === "WIN" ? "success" : "error");
             if (p.sound) beep(isNew ? (x.side === "BUY" ? "buy" : "sell") : x.status === "WIN" ? "win" : "loss");
             if (p.desktop && typeof Notification !== "undefined" && Notification.permission === "granted") {
-              try { new Notification(isNew ? `${x.side} signal` : `Signal ${x.status}`, { body: msg }); } catch { /* blocked */ }
+              pwa.notify(isNew ? `${x.side} signal · ${x.symbol}` : `Signal ${x.status} · ${x.symbol}`, msg).catch(() => undefined);
             }
           }
         }
@@ -256,10 +263,11 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
   const unread = useMemo(() => signals.filter(s => s.id > lastSeen).length, [signals, lastSeen]);
   const markRead = useCallback(() => { if (signals.length) setLastSeen(Math.max(...signals.map(s => s.id))); }, [signals, setLastSeen]);
 
+  const profile = useProfile ? (engine?.profiles?.[symbol] ?? data?.profile ?? null) : null;
   const setSens = useCallback((x: Sens) => { setSensRaw(x); setMinAgree(SENS_AGREE[x]); }, [setSensRaw, setMinAgree]);
   const value: Ctx = {
     symbol, setSymbol, entryTf, setEntryTf, mode, setMode, minAgree, setMinAgree, layers, setLayers, prefs, setPrefs,
-    auto, setAuto, history, setHistory, sens, setSens, consensus, setConsensus, weighting, setWeighting, entryScan, setExtra, news, layout, setLayout, lead, setLead, dir, setDir, viewTf, setViewTf, events, clearEvents, setWanted, data, error, loading, updated, refresh: () => load(true), rows, signals, stats, unread, markRead,
+    auto, setAuto, history, setHistory, engine, refreshEngine, useProfile, setUseProfile, profile, sens, setSens, consensus, setConsensus, weighting, setWeighting, entryScan, setExtra, news, layout, setLayout, lead, setLead, dir, setDir, viewTf, setViewTf, events, clearEvents, setWanted, data, error, loading, updated, refresh: () => load(true), rows, signals, stats, unread, markRead,
   };
   return <C.Provider value={value}>{children}</C.Provider>;
 }

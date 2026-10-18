@@ -17,6 +17,7 @@ import AlertsPage from "./pages/AlertsPage";
 import BacktestPage from "./pages/BacktestPage";
 import ProfilePage from "./pages/ProfilePage";
 import { fmtPrice } from "./components/MtfChart";
+import PwaBar from "./components/PwaBar";
 import { BLUE, DOWN, UP, WARN, field } from "./components/ui";
 
 const css = `
@@ -129,7 +130,7 @@ function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => vo
   const tfBtn = (t: string) => ({ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, padding: "4px 9px", borderRadius: 6, border: `1px solid ${t === entryTf ? BLUE : readiness(t) ?? "var(--border2)"}`, background: t === entryTf ? "#0094ff22" : "transparent", color: t === entryTf ? BLUE : "var(--text-dim)" } as const);
 
   const top = (
-    <header style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: mobile ? "10px 12px" : "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--surface)", position: "sticky", top: 0, zIndex: 20 }}>
+    <header style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: mobile ? "calc(10px + env(safe-area-inset-top)) 12px 10px" : "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--surface)", position: "sticky", top: 0, zIndex: 20 }}>
       {mobile && <b style={{ color: UP, letterSpacing: 2, fontSize: 12 }}>NEXUS</b>}
       <select value={symbol} onChange={e => setSymbol(e.target.value)} style={{ ...field, fontWeight: 800, fontSize: 12 }} aria-label="pair">
         {PAIRS.map(p => <option key={p} value={p}>{PAIR_DISPLAY[p] || p}</option>)}
@@ -167,7 +168,8 @@ function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => vo
       )}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
         {top}
-        <main style={{ padding: mobile ? "12px 12px 80px" : "18px 20px 30px", flex: 1 }}>
+        <PwaBar />
+        <main style={{ padding: mobile ? "12px 12px calc(80px + env(safe-area-inset-bottom))" : "18px 20px 30px", flex: 1 }}>
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/charts" element={<ChartsPage />} />
@@ -181,7 +183,7 @@ function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => vo
         </main>
       </div>
       {mobile && (
-        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", background: "var(--surface)", borderTop: "1px solid var(--border)", zIndex: 30 }}>
+        <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, paddingBottom: "env(safe-area-inset-bottom)", display: "flex", background: "var(--surface)", borderTop: "1px solid var(--border)", zIndex: 30 }}>
           {NAV.map(n => (
             <NavLink key={n.to} to={n.to} end={n.to === "/"} style={({ isActive }) => ({ flex: 1, textAlign: "center", padding: "8px 0 10px", textDecoration: "none", fontSize: 9, fontWeight: 700, color: isActive ? UP : "var(--text-dim)" })}>
               <div style={{ fontSize: 16 }}>{n.icon}</div>{n.label}

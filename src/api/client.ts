@@ -4,7 +4,7 @@ import type {
   User, Ticker, OHLCV, Signal, Bot, Trade, Strategy, BacktestResult, SMCResponse, BotLog,
 } from "../types";
 import type {
-  MtfResponse, ScannerRow, MtfSignalRow, MtfSignalStats, MtfBacktest, StoreSeries, MtfMode, SignalPreview, NewsResponse, EntryScan, EngineConfig, Sens,
+  MtfResponse, ScannerRow, MtfSignalRow, MtfSignalStats, MtfBacktest, StoreSeries, MtfMode, SignalPreview, NewsResponse, EntryScan, EngineConfig, EngineProfile, OptResult, Sens,
 } from "../types/mtf";
 
 // FIX: this was hardcoded to "https://cryptobotapi.onrender.com" — a stale
@@ -81,30 +81,35 @@ export const marketApi = {
 // a fast pair/timeframe switch cancels the request it superseded instead of
 // letting a late answer overwrite the newer one.
 export const mtfApi = {
-  analysis: (symbol: string, o: { mode: MtfMode; entryTf: string; minAgree: number; tfs: string[]; bars?: number; sens?: Sens; consensus?: boolean; weighting?: string }, signal?: AbortSignal) =>
+  analysis: (symbol: string, o: { mode: MtfMode; entryTf: string; minAgree: number; tfs: string[]; bars?: number; sens?: Sens; consensus?: boolean; weighting?: string; profile?: boolean }, signal?: AbortSignal) =>
     req<MtfResponse>(
-      `/market/mtf/${symbol}?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}&tfs=${o.tfs.join(",")}&bars=${o.bars ?? 300}&sens=${o.sens ?? "balanced"}&consensus=${!!o.consensus}&weighting=${o.weighting ?? "equal"}`,
+      `/market/mtf/${symbol}?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}&tfs=${o.tfs.join(",")}&bars=${o.bars ?? 300}&sens=${o.sens ?? "balanced"}&consensus=${!!o.consensus}&weighting=${o.weighting ?? "equal"}&profile=${o.profile !== false}`,
       { signal },
     ),
-  overview: (o: { mode: MtfMode; entryTf: string; minAgree: number; sens?: Sens; consensus?: boolean; weighting?: string }, signal?: AbortSignal) =>
+  overview: (o: { mode: MtfMode; entryTf: string; minAgree: number; sens?: Sens; consensus?: boolean; weighting?: string; profile?: boolean }, signal?: AbortSignal) =>
     req<{ rows: ScannerRow[]; updated: number; demo: boolean }>(
-      `/market/overview?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}&sens=${o.sens ?? "balanced"}&consensus=${!!o.consensus}&weighting=${o.weighting ?? "equal"}`, { signal },
+      `/market/overview?mode=${o.mode}&entry_tf=${o.entryTf}&min_agree=${o.minAgree}&sens=${o.sens ?? "balanced"}&consensus=${!!o.consensus}&weighting=${o.weighting ?? "equal"}&profile=${o.profile !== false}`, { signal },
     ),
   signals: (limit = 60, signal?: AbortSignal) =>
     req<{ signals: MtfSignalRow[]; stats: MtfSignalStats }>(`/market/mtf-signals?limit=${limit}`, { signal }),
   backtest: (symbol: string, o: { style: string; entryTf: string; bars: number; minAgree: number; longOnly: boolean } & Partial<{
     sens: Sens; rr: number; slBuffer: number; feePct: number; slippagePct: number; minGrade: string; breakevenAtR: number;
-    maxHold: number; killzoneOnly: boolean; gateSweep: boolean; consensus: boolean }>) => {
+    maxHold: number; killzoneOnly: boolean; gateSweep: boolean; consensus: boolean; riskGuard: number; maxChaseAtr: number; minRoomRr: number; maxRiskPct: number }>) => {
     const q = new URLSearchParams({
       style: o.style, entry_tf: o.entryTf, bars: String(o.bars), min_agree: String(o.minAgree), long_only: String(o.longOnly),
       sens: o.sens ?? "balanced", rr: String(o.rr ?? 0), sl_buffer: String(o.slBuffer ?? -1), fee_pct: String(o.feePct ?? 0.1),
       slippage_pct: String(o.slippagePct ?? 0), min_grade: o.minGrade ?? "D", breakeven_at_r: String(o.breakevenAtR ?? 0),
       max_hold_bars: String(o.maxHold ?? 300), killzone_only: String(!!o.killzoneOnly), gate_sweep: String(!!o.gateSweep), consensus: String(!!o.consensus),
+      risk_guard: String(o.riskGuard ?? -1), max_chase_atr: String(o.maxChaseAtr ?? 0), min_room_rr: String(o.minRoomRr ?? 0), max_risk_pct: String(o.maxRiskPct ?? 0),
     });
     return req<MtfBacktest>(`/market/mtf/backtest/${symbol}?${q}`);
   },
-  entryScan: (symbol: string, o: { mode: MtfMode; minAgree: number; sens: Sens; consensus: boolean; weighting: string }, signal?: AbortSignal) =>
-    req<EntryScan>(`/market/entry-scan/${symbol}?mode=${o.mode}&min_agree=${o.minAgree}&sens=${o.sens}&consensus=${o.consensus}&weighting=${o.weighting}`, { signal }),
+  entryScan: (symbol: string, o: { mode: MtfMode; minAgree: number; sens: Sens; consensus: boolean; weighting: string; profile?: boolean }, signal?: AbortSignal) =>
+    req<EntryScan>(`/market/entry-scan/${symbol}?mode=${o.mode}&min_agree=${o.minAgree}&sens=${o.sens}&consensus=${o.consensus}&weighting=${o.weighting}&profile=${o.profile !== false}`, { signal }),
+  optimize: (symbol: string, o: { style: string; entryTf: string; bars: number; feePct?: number; slippagePct?: number }, signal?: AbortSignal) =>
+    req<OptResult>(`/market/mtf/optimize/${symbol}?style=${o.style}&entry_tf=${o.entryTf}&bars=${o.bars}&fee_pct=${o.feePct ?? 0.1}&slippage_pct=${o.slippagePct ?? 0}`, { signal }),
+  saveProfile: (token: string, symbol: string, profile: EngineProfile | null) =>
+    req<{ ok: boolean; profile: EngineProfile; config: EngineConfig }>(`/settings/engine/profile/${symbol}`, { method: "PUT", body: JSON.stringify(profile ?? {}) }, token),
   engine: () => req<{ config: EngineConfig; presets: Record<string, { min_agree: number; label: string }> }>("/market/engine"),
   saveEngine: (token: string, patch: Partial<EngineConfig>) =>
     req<{ ok: boolean; config: EngineConfig }>("/settings/engine", { method: "PUT", body: JSON.stringify(patch) }, token),

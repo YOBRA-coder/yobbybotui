@@ -4,7 +4,8 @@ import { mtfApi } from "../api/client";
 import { useMtf } from "../context/MtfContext";
 import { PAIRS, PAIR_DISPLAY } from "../types";
 import { ENTRY_TFS, SENS_AGREE } from "../types/mtf";
-import type { MtfBacktest, Sens, StoreSeries } from "../types/mtf";
+import type { EngineProfile, MtfBacktest, Sens, StoreSeries } from "../types/mtf";
+import Optimizer from "../components/Optimizer";
 import { BLUE, DOWN, EquityDD, GroupBars, Histogram, UP, WARN, ago, card, cardHead, field } from "../components/ui";
 
 type Notify = (m: string, t?: "success" | "error" | "info") => void;
@@ -37,6 +38,7 @@ export default function BacktestPage({ notify }: { notify: Notify }) {
   const [kz, setKz] = useState(false);
   const [sweep, setSweep] = useState(false);
   const [cons, setCons] = useState(ctxConsensus);
+  const [guard, setGuard] = useState("");           // safe-entry level for this run ("" = follow the sensitivity preset)
   const [longOnly, setLongOnly] = useState(false);
   const [capital, setCapital] = useState("10000");
   const [risk, setRisk] = useState("1");
@@ -60,6 +62,7 @@ export default function BacktestPage({ notify }: { notify: Notify }) {
       style, entryTf: tfx, bars, minAgree: s === sens ? agree : SENS_AGREE[s], longOnly, sens: s,
       ...(adv ? { rr: num(rr, 0), slBuffer: slb === "" ? -1 : num(slb, 0.25), feePct: num(fee, 0.1), slippagePct: num(slip, 0), minGrade: grade, breakevenAtR: num(be, 0),
         maxHold: num(hold, 300), killzoneOnly: kz, gateSweep: sweep, consensus: cons } : {}),
+      ...(guard !== "" ? { riskGuard: +guard } : {}),
     };
   };
   const run = async () => {
@@ -134,6 +137,7 @@ export default function BacktestPage({ notify }: { notify: Notify }) {
         </div>
         {adv && (
           <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)", display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 12 }}>
+            {L("Safe entry", <select style={field} value={guard} onChange={e => setGuard(e.target.value)}><option value="">Auto (sensitivity)</option><option value="0">Off</option><option value="1">Block high risk</option><option value="2">Block medium+</option></select>)}
             {L("Min agreement %", <input style={field} inputMode="numeric" value={agree} onChange={e => setAgree(num(e.target.value, 70))} />)}
             {L("Target (R) — blank = default", <input style={field} inputMode="decimal" placeholder="2.0 / 1.5" value={rr} onChange={e => setRr(e.target.value)} />)}
             {L("Stop buffer (× ATR)", <input style={field} inputMode="decimal" placeholder="0.25" value={slb} onChange={e => setSlb(e.target.value)} />)}
@@ -155,6 +159,17 @@ export default function BacktestPage({ notify }: { notify: Notify }) {
         )}
         {!bt && !cmp && <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 12 }}>Replays the same engine bar by bar on stored candles — higher timeframes only ever use bars that had already closed, the stop is checked before the target on a bar that touches both, and fees are charged on both sides.</div>}
       </div>
+
+      <Optimizer style={style} entryTf={tf} notify={notify} onPreview={(p: EngineProfile) => {
+        setAdv(true);
+        if (p.sens) setSens(p.sens);
+        if (p.min_agree) setAgree(p.min_agree);
+        const r = style === "scalp" ? p.rr_scalp : p.rr_intraday;
+        setRr(r ? String(r) : "");
+        setSlb(p.sl_buffer != null ? String(p.sl_buffer) : "");
+        setGuard(p.risk_guard != null ? String(p.risk_guard) : "");
+        notify("Form filled with those settings — press Run backtest to see the full report", "info");
+      }} />
 
       {cmp && (
         <div style={card}>

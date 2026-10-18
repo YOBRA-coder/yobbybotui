@@ -3,6 +3,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { BrowserRouter } from "react-router-dom";
+import { initPwa } from "./pwa";
+
+initPwa();
 
 // Prints in the browser DevTools console the instant the app loads.
 // Compare this against GET /health's "build" field on the backend — if
