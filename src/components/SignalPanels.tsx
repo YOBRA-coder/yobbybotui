@@ -218,7 +218,7 @@ export function VoteCard({ embedded = false }: { embedded?: boolean }) {
 const SENS_LIST: Sens[] = ["strict", "balanced", "fast"];
 export function EngineBar() {
   const { sens, setSens, minAgree, setMinAgree, mode, setMode, entryTf, setEntryTf, entryScan, engine, refreshEngine, refresh, useProfile, setUseProfile, symbol } = useMtf();
-  const auth = useAuth();
+  const { auth } = useAuth();
   const prof = engine?.profiles?.[symbol];
   const guardVal = engine?.risk_guard == null ? "auto" : String(engine.risk_guard);
   const setGuard = async (v: string) => {
