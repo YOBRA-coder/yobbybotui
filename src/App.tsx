@@ -119,13 +119,14 @@ const NAV: { to: string; label: string; icon: string }[] = [
 function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => void; notif: Notif | null }) {
   const mobile = useIsMobile(820);
   const nav = useNavigate();
-  const { symbol, setSymbol, entryTf, setEntryTf, data, loading, error, refresh, auto, setAuto, unread, updated } = useMtf();
+  const { symbol, setSymbol, entryTf, setEntryTf, entryScan, data, loading, error, refresh, auto, setAuto, unread, updated } = useMtf();
   const [clock, setClock] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setClock(Date.now()), 1000); return () => clearInterval(t); }, []);
   const age = updated ? Math.round(clock / 1000 - updated) : null;
   const status = error ? { t: "Feed problem", c: DOWN } : loading && !data ? { t: "Analysing…", c: WARN } : data?.demo ? { t: "Demo data", c: WARN } : data ? { t: age != null ? `Analysis ${age}s ago` : "Live", c: UP } : { t: "Connecting…", c: WARN };
   const chg = data?.changePct;
-  const tfBtn = (t: string) => ({ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, padding: "4px 9px", borderRadius: 6, border: `1px solid ${t === entryTf ? BLUE : "var(--border2)"}`, background: t === entryTf ? "#0094ff22" : "transparent", color: t === entryTf ? BLUE : "var(--text-dim)" } as const);
+  const readiness = (t: string) => { const r = entryScan?.rows.find(x => x.tf === t); return r?.state === "SIGNAL" ? (r.type === "SELL" ? DOWN : UP) : r?.state === "SETUP" ? WARN : null; };
+  const tfBtn = (t: string) => ({ cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, padding: "4px 9px", borderRadius: 6, border: `1px solid ${t === entryTf ? BLUE : readiness(t) ?? "var(--border2)"}`, background: t === entryTf ? "#0094ff22" : "transparent", color: t === entryTf ? BLUE : "var(--text-dim)" } as const);
 
   const top = (
     <header style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: mobile ? "10px 12px" : "10px 20px", borderBottom: "1px solid var(--border)", background: "var(--surface)", position: "sticky", top: 0, zIndex: 20 }}>
@@ -138,7 +139,7 @@ function Frame({ notify, notif }: { notify: (m: string, t?: Notif["type"]) => vo
       </div>
       <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
         <span style={{ fontSize: 9, color: "var(--text-mute)", letterSpacing: 1.5 }}>ENTRY TF</span>
-        {ENTRY_TFS.map(t => <button key={t} style={tfBtn(t)} onClick={() => setEntryTf(t)}>{t.toUpperCase()}</button>)}
+        {ENTRY_TFS.map(t => <button key={t} style={tfBtn(t)} title={readiness(t) ? `${t.toUpperCase()} has a signal or setup ready` : undefined} onClick={() => setEntryTf(t)}>{t.toUpperCase()}{readiness(t) && <span style={{ color: readiness(t)!, marginLeft: 3 }}>●</span>}</button>)}
       </div>
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
         <span style={{ fontSize: 10, color: status.c, fontWeight: 700 }}><span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 7, background: status.c, marginRight: 5, animation: loading ? "pulse 1s infinite" : undefined }} />{status.t}</span>

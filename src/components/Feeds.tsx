@@ -56,6 +56,52 @@ export function NewsList({ symbol, limit = 12, allowToggle = true }: { symbol: s
   );
 }
 
+// ── entry / stop / target over candles (used for stored signals and for the live plan) ──
+export function PreviewSvg({ candles, entry, sl, tp, side, entryTime, exitTime, exitPrice, status, height = 150 }: {
+  candles: { time: number; close: number; high: number; low: number }[]; entry: number; sl: number; tp: number; side: "BUY" | "SELL";
+  entryTime: number; exitTime?: number | null; exitPrice?: number | null; status: string; height?: number;
+}) {
+  const cs = candles;
+  const W = 600, H = height, pad = 8;
+  const vals = cs.flatMap(c => [c.high, c.low]).concat([sl, tp, entry]);
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+  const Y = (p: number) => pad + (1 - (p - lo) / span) * (H - pad * 2);
+  const X = (i: number) => (i / (cs.length - 1)) * W;
+  const ei = cs.findIndex(c => c.time > entryTime);
+  const xi = ei === -1 ? W : X(ei);
+  const xs = (t: number) => { let k = cs.findIndex(c => c.time >= t); if (k < 0) k = cs.length - 1; return X(k); };
+  const pts = cs.map((c, i) => `${X(i)},${Y(c.close)}`);
+  const col = status === "WIN" ? UP : status === "LOSS" ? DOWN : BLUE;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" width="100%" height={H} role="img" aria-label={`${side} trade preview`} style={{ display: "block", background: "var(--bg2)", borderRadius: 8 }}>
+      <rect x={xi} y={Math.min(Y(entry), Y(tp))} width={Math.max(0, W - xi)} height={Math.abs(Y(tp) - Y(entry))} fill={UP} fillOpacity={0.12} />
+      <rect x={xi} y={Math.min(Y(entry), Y(sl))} width={Math.max(0, W - xi)} height={Math.abs(Y(sl) - Y(entry))} fill={DOWN} fillOpacity={0.12} />
+      <line x1={0} x2={W} y1={Y(tp)} y2={Y(tp)} stroke={UP} strokeDasharray="4 3" />
+      <line x1={0} x2={W} y1={Y(sl)} y2={Y(sl)} stroke={DOWN} strokeDasharray="4 3" />
+      <line x1={0} x2={W} y1={Y(entry)} y2={Y(entry)} stroke={BLUE} strokeDasharray="2 3" />
+      <polygon points={`0,${H} ${pts.join(" ")} ${W},${H}`} fill={MUTED} fillOpacity={0.12} />
+      <polyline points={pts.join(" ")} fill="none" stroke="var(--text)" strokeWidth={1.6} vectorEffect="non-scaling-stroke" />
+      <line x1={xi} x2={xi} y1={0} y2={H} stroke={side === "BUY" ? UP : DOWN} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+      {exitTime && exitPrice != null && <circle cx={xs(exitTime)} cy={Y(exitPrice)} r={5} fill={col} />}
+    </svg>
+  );
+}
+
+/** The live trade plan drawn over the latest candles: where you would enter, stop and take profit. */
+export function PlanPreview({ candles, plan, entryTime }: { candles: { time: number; close: number; high: number; low: number }[]; plan: { side: "BUY" | "SELL"; entry: number; sl: number; tp: number; rr: number; risk_pct: number }; entryTime?: number }) {
+  const cs = candles.slice(-90);
+  if (cs.length < 3) return null;
+  return (
+    <div>
+      <PreviewSvg candles={cs} entry={plan.entry} sl={plan.sl} tp={plan.tp} side={plan.side} entryTime={entryTime ?? cs[cs.length - 2].time} status="OPEN" height={130} />
+      <div style={{ display: "flex", gap: 10, fontSize: 10, flexWrap: "wrap", marginTop: 4 }}>
+        <span style={{ color: BLUE }}>Entry {plan.entry.toPrecision(6)}</span><span style={{ color: DOWN }}>SL {plan.sl.toPrecision(6)}</span>
+        <span style={{ color: UP }}>TP {plan.tp.toPrecision(6)}</span><span style={{ color: "var(--text-dim)" }}>{plan.rr}R · risk {plan.risk_pct.toFixed(2)}%</span>
+      </div>
+    </div>
+  );
+}
+
 // ── signal preview: entry / stop / target over the candles around the signal ──
 const cache = new Map<number, SignalPreview>();
 export function SignalPreviewChart({ id, height = 150 }: { id: number; height?: number }) {
@@ -71,35 +117,13 @@ export function SignalPreviewChart({ id, height = 150 }: { id: number; height?: 
   if (!pv) return <div style={{ height, color: "var(--text-dim)", fontSize: 10.5 }}>Loading preview…</div>;
   const s = pv.signal, cs = pv.candles;
   if (cs.length < 3) return <div style={{ color: "var(--text-dim)", fontSize: 10.5 }}>Not enough stored candles to draw this signal yet.</div>;
-  const W = 600, H = height, pad = 8;
-  const vals = cs.flatMap(c => [c.high, c.low]).concat([s.sl, s.tp, s.entry]);
-  const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
-  const Y = (p: number) => pad + (1 - (p - lo) / span) * (H - pad * 2);
-  const X = (i: number) => (i / (cs.length - 1)) * W;
-  const ei = Math.max(0, cs.findIndex(c => c.time > s.bar_time));
-  const xi = ei === -1 ? 0 : X(ei);
-  const long = s.side === "BUY";
-  const xs = (t: number) => { let k = cs.findIndex(c => c.time >= t); if (k < 0) k = cs.length - 1; return X(k); };
-  const pts = cs.map((c, i) => `${X(i)},${Y(c.close)}`);
-  const exitX = s.closed_at ? xs(s.closed_at) : null;
-  const exitY = s.exit_price != null ? Y(s.exit_price) : null;
   const col = s.status === "WIN" ? UP : s.status === "LOSS" ? DOWN : BLUE;
   return (
     <div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" width="100%" height={H} role="img" aria-label={`${s.symbol} ${s.side} preview`} style={{ display: "block", background: "var(--bg2)", borderRadius: 8 }}>
-        <rect x={xi} y={Math.min(Y(s.entry), Y(s.tp))} width={W - xi} height={Math.abs(Y(s.tp) - Y(s.entry))} fill={UP} fillOpacity={0.12} />
-        <rect x={xi} y={Math.min(Y(s.entry), Y(s.sl))} width={W - xi} height={Math.abs(Y(s.sl) - Y(s.entry))} fill={DOWN} fillOpacity={0.12} />
-        <line x1={0} x2={W} y1={Y(s.tp)} y2={Y(s.tp)} stroke={UP} strokeDasharray="4 3" />
-        <line x1={0} x2={W} y1={Y(s.sl)} y2={Y(s.sl)} stroke={DOWN} strokeDasharray="4 3" />
-        <line x1={0} x2={W} y1={Y(s.entry)} y2={Y(s.entry)} stroke={BLUE} strokeDasharray="2 3" />
-        <polygon points={`0,${H} ${pts.join(" ")} ${W},${H}`} fill={MUTED} fillOpacity={0.12} />
-        <polyline points={pts.join(" ")} fill="none" stroke="var(--text)" strokeWidth={1.6} vectorEffect="non-scaling-stroke" />
-        <line x1={xi} x2={xi} y1={0} y2={H} stroke={long ? UP : DOWN} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
-        {exitX != null && exitY != null && <circle cx={exitX} cy={exitY} r={5} fill={col} />}
-      </svg>
+      <PreviewSvg candles={cs} entry={s.entry} sl={s.sl} tp={s.tp} side={s.side} entryTime={s.bar_time} exitTime={s.closed_at} exitPrice={s.exit_price} status={s.status} height={height} />
       <div style={{ display: "flex", gap: 12, fontSize: 9.5, color: "var(--text-dim)", marginTop: 4, flexWrap: "wrap" }}>
         <span style={{ color: UP }}>━ target</span><span style={{ color: DOWN }}>━ stop</span><span style={{ color: BLUE }}>┅ entry</span>
-        <span>{long ? "▲" : "▼"} fired {ago(s.created_at)}</span>
+        <span>{s.side === "BUY" ? "▲" : "▼"} fired {ago(s.created_at)}</span>
         {s.status !== "OPEN" && s.closed_at && <span style={{ color: col }}>● {s.status === "WIN" ? "target hit" : s.status === "LOSS" ? "stopped out" : "expired"} {ago(s.closed_at)}</span>}
       </div>
     </div>

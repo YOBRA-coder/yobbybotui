@@ -4,10 +4,12 @@
 // desktop notification) when a NEW signal fires — on whichever page you are looking at.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import { mtfApi } from "../api/client";
-import type { LayerKey, MtfMode, MtfResponse, MtfSignalRow, MtfSignalStats, ScannerRow } from "../types/mtf";
+import { useAuth } from "./AuthContext";
+import { SENS_AGREE } from "../types/mtf";
+import type { EntryScan, LayerKey, MtfMode, MtfResponse, MtfSignalRow, MtfSignalStats, NewsItem, ScannerRow, Sens } from "../types/mtf";
 
 export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
-  ob: true, fvg: true, sd: true, poi: true, bos: true, choch: true, swings: true, eq: true, sweep: true, retest: true, trend: true, pd: false, plan: true, volume: false,
+  ob: true, fvg: true, sd: true, poi: true, bos: true, choch: true, swings: true, eq: true, sweep: true, retest: true, trend: true, pd: false, plan: true, volume: false, signals: true, news: true,
 };
 export interface Prefs { toast: boolean; sound: boolean; desktop: boolean }
 const DEFAULT_PREFS: Prefs = { toast: true, sound: true, desktop: false };
@@ -52,6 +54,9 @@ interface Ctx {
   prefs: Prefs; setPrefs: (p: Prefs) => void;
   auto: boolean; setAuto: (b: boolean) => void;
   history: number; setHistory: (n: number) => void;
+  sens: Sens; setSens: (s: Sens) => void; consensus: boolean; setConsensus: (b: boolean) => void;
+  weighting: "equal" | "best"; setWeighting: (w: "equal" | "best") => void;
+  entryScan: EntryScan | null; setExtra: (id: string, tf: string | null) => void; news: NewsItem[];
   layout: 1 | 2 | 3; setLayout: (n: 1 | 2 | 3) => void;
   lead: string; setLead: (s: string) => void; dir: string; setDir: (s: string) => void;
   viewTf: string; setViewTf: (s: string) => void;
@@ -72,7 +77,14 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
   const [layers, setLayers] = useStored<Record<LayerKey, boolean>>("cs_layers_v1", DEFAULT_LAYERS);
   const [prefs, setPrefs] = useStored<Prefs>("cs_prefs", DEFAULT_PREFS);
   const [auto, setAuto] = useState(true);
+  const { auth } = useAuth();
   const [history, setHistory] = useStored<number>("cs_bars", 300);
+  const [sens, setSensRaw] = useStored<Sens>("cs_sens", "balanced");
+  const [consensus, setConsensus] = useStored<boolean>("cs_consensus", false);
+  const [weighting, setWeighting] = useStored<"equal" | "best">("cs_weight", "equal");
+  const [extra, setExtraState] = useState<Record<string, string>>({});
+  const [entryScan, setEntryScan] = useState<EntryScan | null>(null);
+  const [news, setNews] = useState<NewsItem[]>([]);
   const [layout, setLayout] = useStored<1 | 2 | 3>("cs_layout", 3);
   const [lead, setLead] = useStored<string>("cs_lead", "4h");
   const [dir, setDir] = useStored<string>("cs_dir", "1h");
@@ -100,7 +112,14 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
 
   const setSymbol = useCallback((s: string) => { setSymbolRaw(s); setData(null); }, [setSymbolRaw]);
   const setWanted = useCallback((tfs: string[]) => setWantedState(prev => (prev.join() === tfs.join() ? prev : tfs)), []);
-  const tfs = useMemo(() => Array.from(new Set([...wanted, entryTf])).slice(0, 6), [wanted, entryTf]);
+  const setExtra = useCallback((id: string, tf: string | null) => setExtraState(p => {
+    if ((p[id] ?? null) === tf) return p;
+    const n = { ...p };
+    if (tf) n[id] = tf; else delete n[id];
+    return n;
+  }), []);
+  const extraKey = Object.values(extra).join();
+  const tfs = useMemo(() => Array.from(new Set([...wanted, entryTf, ...Object.values(extra)])).slice(0, 6), [wanted, entryTf, extraKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const tfKey = tfs.join(",");
 
   // analysis: one request in flight; late answers from a superseded request are dropped
@@ -113,7 +132,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     abort.current = ac;
     if (spinner) setLoading(true);
     try {
-      const r = await mtfApi.analysis(symbol, { mode, entryTf, minAgree, tfs: tfKey.split(","), bars: history }, ac.signal);
+      const r = await mtfApi.analysis(symbol, { mode, entryTf, minAgree, tfs: tfKey.split(","), bars: history, sens, consensus, weighting }, ac.signal);
       if (id !== reqId.current) return;
       if (!r.ok) { setError(r.error || "No data"); setData(null); }
       else { setData(r); setError(null); setUpdated(Date.now() / 1000); }
@@ -123,7 +142,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     } finally {
       if (id === reqId.current) setLoading(false);
     }
-  }, [symbol, mode, entryTf, minAgree, tfKey, history]);
+  }, [symbol, mode, entryTf, minAgree, tfKey, history, sens, consensus, weighting]);
 
   useEffect(() => {
     load(true);
@@ -139,7 +158,7 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     prevStates.current = null;
     const run = async () => {
       try {
-        const o = await mtfApi.overview({ mode, entryTf, minAgree });
+        const o = await mtfApi.overview({ mode, entryTf, minAgree, sens, consensus, weighting });
         if (!live) return;
         setRows(o.rows);
         const prev = prevStates.current;
@@ -158,7 +177,39 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
     run();
     const t = setInterval(run, 30000);
     return () => { live = false; clearInterval(t); };
-  }, [mode, entryTf, minAgree, pushEvents]);
+  }, [mode, entryTf, minAgree, sens, consensus, weighting, pushEvents]);
+
+  // which entry timeframe is ready right now (drives the dots on the top-bar buttons)
+  useEffect(() => {
+    let live = true;
+    const ac = new AbortController();
+    const run = async () => {
+      try { const r = await mtfApi.entryScan(symbol, { mode, minAgree, sens, consensus, weighting }, ac.signal); if (live) setEntryScan(r); } catch { /* keep last */ }
+    };
+    setEntryScan(null);
+    run();
+    const t = setInterval(run, 30000);
+    return () => { live = false; ac.abort(); clearInterval(t); };
+  }, [symbol, mode, minAgree, sens, consensus, weighting]);
+
+  // headlines for the chart's news markers (this coin)
+  useEffect(() => {
+    let live = true;
+    setNews([]);
+    const run = () => mtfApi.news(symbol, 40).then(r => { if (live) setNews(r.items); }).catch(() => undefined);
+    run();
+    const t = setInterval(run, 300000);
+    return () => { live = false; clearInterval(t); };
+  }, [symbol]);
+
+  // keep the server's engine settings in step, so the background scanner (and your Telegram alerts) follow the rules you picked
+  const firstSync = useRef(true);
+  useEffect(() => {
+    if (firstSync.current) { firstSync.current = false; return; }
+    if (!auth.token) return;
+    const t = setTimeout(() => { mtfApi.saveEngine(auth.token!, { mode, entry_tf: entryTf, min_agree: minAgree, sens, consensus, weighting }).catch(() => undefined); }, 900);
+    return () => clearTimeout(t);
+  }, [mode, entryTf, minAgree, sens, consensus, weighting, auth.token]);
 
   // signal feed + alerts
   const known = useRef<Map<number, string> | null>(null);
@@ -205,9 +256,10 @@ export function MtfProvider({ children, notify }: { children: ReactNode; notify:
   const unread = useMemo(() => signals.filter(s => s.id > lastSeen).length, [signals, lastSeen]);
   const markRead = useCallback(() => { if (signals.length) setLastSeen(Math.max(...signals.map(s => s.id))); }, [signals, setLastSeen]);
 
+  const setSens = useCallback((x: Sens) => { setSensRaw(x); setMinAgree(SENS_AGREE[x]); }, [setSensRaw, setMinAgree]);
   const value: Ctx = {
     symbol, setSymbol, entryTf, setEntryTf, mode, setMode, minAgree, setMinAgree, layers, setLayers, prefs, setPrefs,
-    auto, setAuto, history, setHistory, layout, setLayout, lead, setLead, dir, setDir, viewTf, setViewTf, events, clearEvents, setWanted, data, error, loading, updated, refresh: () => load(true), rows, signals, stats, unread, markRead,
+    auto, setAuto, history, setHistory, sens, setSens, consensus, setConsensus, weighting, setWeighting, entryScan, setExtra, news, layout, setLayout, lead, setLead, dir, setDir, viewTf, setViewTf, events, clearEvents, setWanted, data, error, loading, updated, refresh: () => load(true), rows, signals, stats, unread, markRead,
   };
   return <C.Provider value={value}>{children}</C.Provider>;
 }

@@ -2,7 +2,7 @@
 import { useMtf } from "../context/MtfContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { PAIR_DISPLAY } from "../types";
-import { Checklist, SessionsCard, SignalCard, Workspace } from "../components/SignalPanels";
+import { Checklist, SessionsCard, SignalCard, VoteCard, Workspace } from "../components/SignalPanels";
 import { NewsList } from "../components/Feeds";
 import { DOWN, UP, WARN, Pill, STATE_META, ago, card, cardHead } from "../components/ui";
 
@@ -19,6 +19,7 @@ export default function DashboardPage() {
         <Workspace compact />
         <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
           <SignalCard />
+          <VoteCard />
           <SessionsCard />
         </div>
       </div>
