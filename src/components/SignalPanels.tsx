@@ -28,6 +28,7 @@ export function ConceptBar({ panels }: { panels: MtfPanel[] }) {
       c.swings += p.structure.swings.filter(s => s.label).length;
       c.eq += p.eq.length; c.sweep += p.sweeps.length; c.retest += p.retests.length;
       c.trend += p.trendlines.length; c.pd += p.pd ? 1 : 0;
+      c.amd += p.amd && (p.amd.asia || p.amd.pdh != null) ? 1 : 0; c.ote += p.ote ? 1 : 0; c.brk += (p.breakers ?? []).length;
     });
     c.plan = data?.decision.plan ? 1 : 0;
     return c;
@@ -57,6 +58,11 @@ function FullViewSide({ panel }: { panel: MtfPanel }) {
     panel.orderBlocks.filter(b => !b.mitigated).forEach(b => z.push({ label: `${b.kind} order block`, top: b.top, bottom: b.bottom, color: b.kind === "bullish" ? UP : DOWN }));
     panel.fvgs.filter(g => !g.filled).forEach(g => z.push({ label: `${g.kind} FVG${g.fillPct ? ` (${Math.round(g.fillPct)}% filled)` : ""}`, top: g.top, bottom: g.bottom, color: BLUE }));
     panel.sdZones.forEach(d => z.push({ label: `${d.kind}${d.fresh ? " (fresh)" : ""}`, top: d.top, bottom: d.bottom, color: "#b78bff" }));
+    (panel.breakers ?? []).forEach(k => z.push({ label: `${k.kind} breaker`, top: k.top, bottom: k.bottom, color: "#9fb3d1" }));
+    if (panel.ote) z.push({ label: `OTE ${panel.ote.dir} 62–79%`, top: panel.ote.top, bottom: panel.ote.bottom, color: "#f5c542" });
+    const am = panel.amd;
+    if (am) ([["Asia high", am.asia?.high], ["Asia low", am.asia?.low], ["Prev-day high", am.pdh], ["Prev-day low", am.pdl], ["Prev-week high", am.pwh], ["Prev-week low", am.pwl], ["Day open", am.day_open]] as [string, number | null | undefined][])
+      .forEach(([l, v]) => { if (v != null) z.push({ label: l, top: v, bottom: v, color: "#e0b050" }); });
     panel.eq.forEach(e => z.push({ label: `${e.kind}${e.swept ? " swept" : " liquidity"}`, top: e.price, bottom: e.price, color: "#ff7bd5" }));
     return z.sort((a, b) => Math.abs((a.top + a.bottom) / 2 - price) - Math.abs((b.top + b.bottom) / 2 - price)).slice(0, 14);
   }, [panel, price]);
@@ -218,7 +224,7 @@ export function VoteCard({ embedded = false }: { embedded?: boolean }) {
 const SENS_LIST: Sens[] = ["strict", "balanced", "fast"];
 export function EngineBar() {
   const { sens, setSens, minAgree, setMinAgree, mode, setMode, entryTf, setEntryTf, entryScan, engine, refreshEngine, refresh, useProfile, setUseProfile, symbol } = useMtf();
-  const { auth } = useAuth();
+  const {auth} = useAuth();
   const prof = engine?.profiles?.[symbol];
   const guardVal = engine?.risk_guard == null ? "auto" : String(engine.risk_guard);
   const setGuard = async (v: string) => {
@@ -402,6 +408,17 @@ export function SignalCard({ compact = false }: { compact?: boolean }) {
         );
       })()}
       {!compact && data && <OutlookCard data={data} />}
+      {!compact && data && (() => {
+        const am = data.panels.find(p => p.tf === dec.setup_tf)?.amd;
+        if (!am || !am.text) return null;
+        const c = am.expected === "bullish" ? UP : am.expected === "bearish" ? DOWN : "var(--text-mute)";
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${c === "var(--text-mute)" ? "var(--border2)" : c + "55"}`, borderRadius: 8, padding: "6px 9px", fontSize: 11, lineHeight: 1.45 }}>
+            <span style={{ fontWeight: 800, color: c, fontSize: 10, letterSpacing: 0.6 }}>AMD · {am.phase ?? am.clock_phase}</span>
+            <div style={{ color: "var(--text-dim)" }}>{am.text}</div>
+          </div>
+        );
+      })()}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, margin: "12px 0" }}>
         {steps.map(([label, ids]) => {
           const st = stepState(dec, ids);

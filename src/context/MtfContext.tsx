@@ -10,7 +10,7 @@ import { SENS_AGREE } from "../types/mtf";
 import type { EngineConfig, EngineProfile, EntryScan, LayerKey, MtfMode, MtfResponse, MtfSignalRow, MtfSignalStats, NewsItem, ScannerRow, Sens } from "../types/mtf";
 
 export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
-  ob: true, fvg: true, sd: true, poi: true, bos: true, choch: true, swings: true, eq: true, sweep: true, retest: true, trend: true, pd: false, plan: true, volume: false, signals: true, news: true,
+  ob: true, fvg: true, sd: true, poi: true, bos: true, choch: true, swings: true, eq: true, sweep: true, retest: true, trend: true, pd: false, amd: true, ote: true, brk: true, plan: true, volume: false, signals: true, news: true,
 };
 export interface Prefs { toast: boolean; sound: boolean; desktop: boolean }
 const DEFAULT_PREFS: Prefs = { toast: true, sound: true, desktop: false };

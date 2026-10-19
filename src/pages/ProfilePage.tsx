@@ -12,9 +12,9 @@ import { BLUE, UP, card, cardHead, field } from "../components/ui";
 export default function ProfilePage({ notify }: { notify: (m: string, t?: "success" | "error" | "info") => void }) {
   const { auth, logout, updateUser } = useAuth();
   const { prefs, setPrefs, mode, setMode, minAgree, setMinAgree, sens, setSens, consensus, setConsensus, weighting, setWeighting } = useMtf();
-  type Adv = Pick<EngineConfig, "rr_intraday" | "rr_scalp" | "sl_buffer" | "gate_sweep" | "gate_killzone" | "risk_guard" | "max_chase_atr" | "min_room_rr" | "max_risk_pct" | "rsi_guard" | "vol_guard" | "avoid_weekend">;
-  const ADV_KEYS: (keyof Adv)[] = ["rr_intraday", "rr_scalp", "sl_buffer", "gate_sweep", "gate_killzone", "risk_guard", "max_chase_atr", "min_room_rr", "max_risk_pct", "rsi_guard", "vol_guard", "avoid_weekend"];
-  const [adv, setAdv] = useState<Adv>({ rr_intraday: null, rr_scalp: null, sl_buffer: null, gate_sweep: null, gate_killzone: null, risk_guard: null, max_chase_atr: null, min_room_rr: null, max_risk_pct: null, rsi_guard: null, vol_guard: null, avoid_weekend: null });
+  type Adv = Pick<EngineConfig, "rr_intraday" | "rr_scalp" | "sl_buffer" | "gate_sweep" | "gate_killzone" | "risk_guard" | "max_chase_atr" | "min_room_rr" | "max_risk_pct" | "rsi_guard" | "vol_guard" | "avoid_weekend" | "gate_amd">;
+  const ADV_KEYS: (keyof Adv)[] = ["rr_intraday", "rr_scalp", "sl_buffer", "gate_sweep", "gate_killzone", "risk_guard", "max_chase_atr", "min_room_rr", "max_risk_pct", "rsi_guard", "vol_guard", "avoid_weekend", "gate_amd"];
+  const [adv, setAdv] = useState<Adv>({ rr_intraday: null, rr_scalp: null, sl_buffer: null, gate_sweep: null, gate_killzone: null, risk_guard: null, max_chase_atr: null, min_room_rr: null, max_risk_pct: null, rsi_guard: null, vol_guard: null, avoid_weekend: null, gate_amd: null });
   const { engine, refreshEngine, refresh } = useMtf();
   const [, pwaTick] = useState(0);
   useEffect(() => pwa.subscribe(() => pwaTick(x => x + 1)), []);
@@ -105,6 +105,7 @@ export default function ProfilePage({ notify }: { notify: (m: string, t?: "succe
         <label style={row}><span>Widest stop allowed (% of price)</span>{nfield("max_risk_pct", "6")}</label>
         <label style={row}><span>Skip exhausted RSI (&gt;76 buys / &lt;24 sells)</span><input type="checkbox" checked={!!adv.rsi_guard} onChange={e => setAdv({ ...adv, rsi_guard: e.target.checked })} /></label>
         <label style={row}><span>Skip volatility spikes (ATR &gt; 2× normal)</span><input type="checkbox" checked={!!adv.vol_guard} onChange={e => setAdv({ ...adv, vol_guard: e.target.checked })} /></label>
+        <label style={row}><span>Don't trade against the AMD session read (Asia raid → expected move)</span><input type="checkbox" checked={!!adv.gate_amd} onChange={e => setAdv({ ...adv, gate_amd: e.target.checked })} /></label>
         <label style={row}><span>Avoid weekends (thin liquidity)</span><input type="checkbox" checked={!!adv.avoid_weekend} onChange={e => setAdv({ ...adv, avoid_weekend: e.target.checked })} /></label>
         <label style={row}><span>Intraday target (R)</span><input style={{ ...field, width: 70 }} inputMode="decimal" placeholder="2.0" value={num(adv.rr_intraday)} onChange={e => setAdv({ ...adv, rr_intraday: e.target.value === "" ? null : +e.target.value })} /></label>
         <label style={row}><span>Scalp target (R)</span><input style={{ ...field, width: 70 }} inputMode="decimal" placeholder="1.5" value={num(adv.rr_scalp)} onChange={e => setAdv({ ...adv, rr_scalp: e.target.value === "" ? null : +e.target.value })} /></label>

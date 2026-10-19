@@ -289,6 +289,12 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
   if (layers.fvg) nearest(panel.fvgs.filter(g => !g.filled), 5).forEach((g, i) =>
     addZone(`fvg${i}`, g.top, g.bottom, g.time, `${tfTag} ${g.kind === "bullish" ? "BULL" : "BEAR"} FVG${g.fillPct > 0 ? ` ${g.fillPct.toFixed(0)}%` : ""}`,
       g.kind === "bullish" ? BLUE : ORANGE, 0.13, "2 2"));
+  if (layers.brk) nearest(panel.breakers ?? [], 3).forEach((k, i) =>
+    addZone(`brk${i}`, k.top, k.bottom, k.time, `${tfTag} ${k.kind === "bullish" ? "BULL" : "BEAR"} BREAKER`, "#9fb3d1", 0.12, "7 3"));
+  if (layers.ote && panel.ote) {
+    const o = panel.ote;
+    addZone("ote", o.top, o.bottom, o.t1, `${tfTag} OTE ${o.dir === "bullish" ? "LONG" : "SHORT"} 62–79%`, "#f5c542", o.inside ? 0.2 : 0.09, "1 3", o.inside);
+  }
   if (layers.poi) panel.poi.forEach((p, i) =>
     addZone(`poi${i}`, p.top, p.bottom, p.time, `POI · ${p.source}`, GOLD, 0.0, "6 3", true));
 
@@ -309,6 +315,46 @@ export default function MtfChart({ panel, layers, plan, planTime, title, subtitl
       </g>,
     );
   });
+  if (layers.amd && panel.amd) {
+    const am = panel.amd;
+    const AMD = "#e0b050";
+    const hl = (key: string, price: number | null | undefined, label: string, t0: number, dash: string, op = 0.8) => {
+      if (price == null) return;
+      const y = yp(price);
+      if (y < MT - 5 || y > MT + plotH + 5) return;
+      const x0 = clampX(xt(t0));
+      if (x0 >= xRight - 2) return;
+      lineEls.push(
+        <g key={key} style={{ pointerEvents: "none" }}>
+          <line x1={x0} x2={xRight} y1={y} y2={y} stroke={AMD} strokeDasharray={dash} strokeOpacity={op} />
+          <text x={xRight - 4} y={y - 3} textAnchor="end" fontSize={9} fontWeight={700} fill={AMD} fillOpacity={0.9}>{label}</text>
+        </g>,
+      );
+    };
+    hl("pdh", am.pdh, "PDH", am.day_start - 86400, "2 4");
+    hl("pdl", am.pdl, "PDL", am.day_start - 86400, "2 4");
+    hl("pwh", am.pwh, "PWH", am.day_start - 7 * 86400, "1 5", 0.6);
+    hl("pwl", am.pwl, "PWL", am.day_start - 7 * 86400, "1 5", 0.6);
+    hl("dopen", am.day_open, "Day open", am.day_start, "8 4", 0.55);
+    hl("wopen", am.week_open, "Week open", am.day_start - 6 * 86400, "8 4", 0.4);
+    if (am.asia) {
+      const a = am.asia;
+      const x0 = clampX(xt(a.t0)), x1 = clampX(xt(a.t1));
+      const yH = yp(a.high), yL = yp(a.low);
+      if (x1 > x0 && yL >= MT - 40 && yH <= MT + plotH + 40) {
+        const col = am.expected === "bullish" ? UP : am.expected === "bearish" ? DOWN : AMD;
+        lineEls.push(
+          <g key="asia" style={{ pointerEvents: "none" }}>
+            <rect x={x0} y={yH} width={x1 - x0} height={Math.max(2, yL - yH)} fill={AMD} fillOpacity={0.1} stroke={AMD} strokeOpacity={0.6} />
+            <line x1={x1} x2={xRight} y1={yH} y2={yH} stroke={AMD} strokeOpacity={0.35} strokeDasharray="3 3" />
+            <line x1={x1} x2={xRight} y1={yL} y2={yL} stroke={AMD} strokeOpacity={0.35} strokeDasharray="3 3" />
+            <text x={x0 + 3} y={yH + 10} fontSize={9} fontWeight={700} fill={AMD}>A · Asia range</text>
+            {am.expected && <text x={x1 + 4} y={am.expected === "bullish" ? yL + 12 : yH - 4} fontSize={9} fontWeight={800} fill={col}>M → D {am.expected === "bullish" ? "▲" : "▼"}</text>}
+          </g>,
+        );
+      }
+    }
+  }
   if (layers.eq) panel.eq.forEach((e, i) => {
     const x0 = clampX(xt(e.t1));
     const x1 = e.swept ? clampX(xt(e.t2) + barW * 6) : xRight;

@@ -27,6 +27,16 @@ export interface MtfPoi { top: number; bottom: number; time: number; kind: Direc
 export interface MtfRetest { time: number; kind: Direction; source: string; top: number; bottom: number; zone_time: number; confirmed: boolean; active: boolean }
 export interface MtfEq { kind: "EQH" | "EQL"; price: number; t1: number; t2: number; swept: boolean }
 export interface MtfPD { high: number; low: number; eq: number; pct: number; t_high: number; t_low: number; t_start: number; zone: "premium" | "discount" | "equilibrium" }
+export interface MtfAmd {
+  day_start: number; price: number; day_open: number | null; week_open: number | null;
+  pdh: number | null; pdl: number | null; pwh: number | null; pwl: number | null;
+  asia: { high: number; low: number; t0: number; t1: number; complete: boolean } | null;
+  london: { high: number; low: number } | null;
+  expected: "bullish" | "bearish" | null; swept: "high" | "low" | "both" | null;
+  phase: string | null; clock_phase: string | null; text: string; weak: boolean;
+}
+export interface MtfOte { dir: Direction; top: number; bottom: number; from: number; to: number; t0: number; t1: number; retrace_pct: number; inside: boolean }
+export interface MtfBreaker { top: number; bottom: number; kind: Direction; time: number; origin_kind: Direction; strength: number }
 export interface MtfTrendline { kind: "support" | "resistance"; t1: number; p1: number; t2: number; p2: number; slope: number; broken: boolean }
 
 export interface MtfPanel {
@@ -43,6 +53,9 @@ export interface MtfPanel {
   eq: MtfEq[];
   pd: MtfPD | null;
   trendlines: MtfTrendline[];
+  amd?: MtfAmd | null;
+  ote?: MtfOte | null;
+  breakers?: MtfBreaker[];
   bias: Bias;
   atr: number;
   barMs: number;
@@ -105,7 +118,7 @@ export interface MtfBacktest {
 
 export interface StoreSeries { symbol: string; interval: string; count: number; first: number; last: number }
 
-export type LayerKey = "ob" | "fvg" | "sd" | "poi" | "bos" | "choch" | "swings" | "eq" | "sweep" | "retest" | "trend" | "pd" | "plan" | "volume" | "signals" | "news";
+export type LayerKey = "ob" | "fvg" | "sd" | "poi" | "bos" | "choch" | "swings" | "eq" | "sweep" | "retest" | "trend" | "pd" | "amd" | "ote" | "brk" | "plan" | "volume" | "signals" | "news";
 
 export const LAYERS: { key: LayerKey; label: string; hint: string; color: string }[] = [
   { key: "ob", label: "Order blocks", hint: "Last opposite candle before an impulse — unmitigated only", color: "#00d084" },
@@ -120,6 +133,9 @@ export const LAYERS: { key: LayerKey; label: string; hint: string; color: string
   { key: "retest", label: "Retests", hint: "Price returning into a live zone", color: "#35e0d0" },
   { key: "trend", label: "Trendlines", hint: "Support / resistance lines through the last two swings", color: "#c0c8d8" },
   { key: "pd", label: "Premium / Discount", hint: "Dealing range, equilibrium at 50%", color: "#6f86a8" },
+  { key: "amd", label: "AMD · sessions", hint: "Asia range (accumulation), London raid (manipulation), then the expected distribution; plus prev day / week high-low and day / week open", color: "#e0b050" },
+  { key: "ote", label: "OTE", hint: "Optimal trade entry — the 62–79% retracement of the latest impulse leg", color: "#f5c542" },
+  { key: "brk", label: "Breakers", hint: "Failed order blocks that flipped side and now act from the other direction", color: "#9fb3d1" },
   { key: "plan", label: "Trade plan", hint: "Entry, stop and target of the current setup", color: "#0094ff" },
   { key: "signals", label: "Past signals", hint: "Where earlier signals fired and how they ended", color: "#0094ff" },
   { key: "news", label: "News", hint: "Headlines about this coin, placed at their publish time (click to open)", color: "#ffb86b" },
@@ -142,13 +158,13 @@ export interface EntryScan { symbol: string; best: string | null; rows: { tf: st
 export interface EngineProfile {
   sens?: Sens; min_agree?: number; entry_tf?: string; mode?: MtfMode; rr_intraday?: number; rr_scalp?: number; sl_buffer?: number;
   risk_guard?: number; max_chase_atr?: number; min_room_rr?: number; max_risk_pct?: number; gate_sweep?: boolean; gate_killzone?: boolean;
-  rsi_guard?: boolean; vol_guard?: boolean; avoid_weekend?: boolean; tuned_at?: number; score?: number;
+  rsi_guard?: boolean; vol_guard?: boolean; avoid_weekend?: boolean; gate_amd?: boolean; tuned_at?: number; score?: number;
 }
 export interface EngineConfig {
   mode: MtfMode; entry_tf: string; min_agree: number; sens: Sens; consensus: boolean; weighting: "equal" | "best";
   rr_intraday: number | null; rr_scalp: number | null; sl_buffer: number | null; gate_sweep: boolean | null; gate_killzone: boolean | null;
   risk_guard: number | null; max_chase_atr: number | null; min_room_rr: number | null; max_risk_pct: number | null;
-  rsi_guard: boolean | null; vol_guard: boolean | null; avoid_weekend: boolean | null;
+  rsi_guard: boolean | null; vol_guard: boolean | null; avoid_weekend: boolean | null; gate_amd: boolean | null;
   profiles: Record<string, EngineProfile>;
 }
 export interface EntryRisk { level: "LOW" | "MEDIUM" | "HIGH"; score: number; reasons: string[]; limit_entry?: number; limit_rr?: number | null }
